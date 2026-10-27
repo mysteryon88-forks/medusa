@@ -1238,12 +1238,35 @@ func (f *Fuzzer) Terminate() {
 	}
 }
 
+// shouldMonitorCorpusInitialization returns whether the corpus initialization process is worth monitoring. There is
+// nothing to monitor if the corpus has already finished initializing, or if it holds no entries at all. Note that the
+// corpus is considered empty only when both kinds of entries (coverage-increasing call sequences and test results)
+// are absent; a corpus holding only one of the two is still monitored.
+func shouldMonitorCorpusInitialization(initializingCorpus bool, totalSequences int, totalTestResults int) bool {
+	return initializingCorpus && (totalSequences > 0 || totalTestResults > 0)
+}
+
+// calculateCorpusHealth calculates the corpus health statistics reported once corpus initialization completes.
+// totalSequences describes the number of coverage-increasing call sequences in the corpus, while totalTestResults
+// describes the number of test result call sequences. validSequences describes the number of corpus entries which
+// replayed successfully during initialization. Note that this counter is incremented for every corpus entry which
+// executed without error (see FuzzerWorker.testNextCallSequence), regardless of whether the entry is a
+// coverage-increasing call sequence or a test result, so it is compared against the total number of entries rather
+// than only the coverage-increasing call sequences.
+// It returns the total number of corpus entries, the number of valid entries, and the number of invalid entries.
+func calculateCorpusHealth(totalSequences int, totalTestResults int, validSequences uint64) (totalEntries int, validEntries int, invalidEntries int) {
+	totalEntries = totalSequences + totalTestResults
+	validEntries = int(validSequences)
+	invalidEntries = totalEntries - validEntries
+	return totalEntries, validEntries, invalidEntries
+}
+
 // monitorCorpusInitialization monitors the corpus initialization process and logs the corpus health when it is complete.
 // This goroutine is short-lived and exits when the corpus is initialized.
 func (f *Fuzzer) monitorCorpusInitialization(ctx context.Context, runCorpus *corpus.Corpus) {
 	// There is nothing to do if there are no corpus elements or unexecuted call sequences
 	totalSequences, totalTestResults := runCorpus.CallSequenceEntryCount()
-	if !runCorpus.InitializingCorpus() || totalSequences == 0 || totalTestResults == 0 {
+	if !shouldMonitorCorpusInitialization(runCorpus.InitializingCorpus(), totalSequences, totalTestResults) {
 		return
 	}
 
@@ -1262,9 +1285,7 @@ func (f *Fuzzer) monitorCorpusInitialization(ctx context.Context, runCorpus *cor
 
 		// Calculate the necessary variables for corpus health
 		totalSequences, totalTestResults := runCorpus.CallSequenceEntryCount()
-		totalCorpusEntries := totalSequences + totalTestResults
-		validSequences := runCorpus.ValidCallSequences()
-		invalidSequences := int(totalSequences - int(validSequences))
+		totalCorpusEntries, validSequences, invalidSequences := calculateCorpusHealth(totalSequences, totalTestResults, runCorpus.ValidCallSequences())
 
 		// Log how much time it took to initialize the corpus
 		f.logger.Info("Finished running call sequences in the corpus in ", time.Since(startTime).Round(time.Second))

@@ -273,11 +273,13 @@ func (c *Corpus) CoverageMaps() *coverage.CoverageMaps {
 // CallSequenceEntryCount returns the total number of call sequences that increased coverage and also any test results
 // that led to a failure.
 func (c *Corpus) CallSequenceEntryCount() (int, int) {
-	return len(c.callSequenceFiles.files), len(c.testResultSequenceFiles.files)
+	return c.callSequenceFiles.count(), c.testResultSequenceFiles.count()
 }
 
 // InitializingCorpus returns true if the corpus is still initializing, false otherwise.
 func (c *Corpus) InitializingCorpus() bool {
+	c.callSequencesLock.Lock()
+	defer c.callSequencesLock.Unlock()
 	return len(c.unexecutedCallSequences) > 0
 }
 
@@ -458,18 +460,11 @@ func (c *Corpus) ValidCallSequences() uint64 {
 // Returns a call sequence loaded from disk which has not yet been executed, to check for test failures. If all
 // sequences in the corpus have been executed, this will return nil.
 func (c *Corpus) UnexecutedCallSequence() *calls.CallSequence {
-	// Prior to thread locking, if we have no un-executed call sequences, quit.
-	// This is a speed optimization, as thread locking on a central component affects performance.
-	if len(c.unexecutedCallSequences) == 0 {
-		return nil
-	}
-
 	// Acquire a thread lock for the duration of this method.
 	c.callSequencesLock.Lock()
 	defer c.callSequencesLock.Unlock()
 
-	// Check that we have an item now that the thread is locked. This must be performed again as an item could've
-	// been removed between time of check (the prior exit condition) and time of use (thread locked operations).
+	// Selecting and removing an entry must share the same lock.
 	if len(c.unexecutedCallSequences) == 0 {
 		return nil
 	}

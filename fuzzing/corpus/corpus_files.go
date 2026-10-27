@@ -47,6 +47,12 @@ func newCorpusDirectory[T any](path string) *corpusDirectory[T] {
 	}
 }
 
+func (cd *corpusDirectory[T]) count() int {
+	cd.filesLock.Lock()
+	defer cd.filesLock.Unlock()
+	return len(cd.files)
+}
+
 // addFile adds a given file to the file list (to later be written to the directory if a path was provided).
 // If a corpusFile exists with the provided file name, it is overwritten in the list (but not yet flushed to disk).
 // If a corpusFile does not exist with the provided file name, it is added.
