@@ -942,111 +942,67 @@ func defaultShrinkingValueMutatorFunc(fuzzer *Fuzzer, valueSet *valuegeneration.
 // spawnWorkersLoop is a method which spawns a config-defined amount of FuzzerWorker to carry out the fuzzing campaign.
 // This function exits when Fuzzer.ctx is cancelled.
 func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
-	// We create our fuzz workers in a loop, using a channel to block when we reach capacity.
-	// If we encounter any errors, we stop.
-	f.workers = make([]*FuzzerWorker, f.config.Fuzzing.Workers)
-	threadReserveChannel := make(chan struct{}, f.config.Fuzzing.Workers)
-
-	// Workers are "reset" when they hit some config-defined limit. They are destroyed and recreated at the same index.
-	// For now, we create our available index queue before initializing some providers and entering our main loop.
-	type availableWorkerSlot struct {
+	type workerSlot struct {
 		index          int
 		randomProvider *rand.Rand
 	}
-	availableWorkerSlotQueue := make([]availableWorkerSlot, f.config.Fuzzing.Workers)
-	availableWorkerIndexedLock := sync.Mutex{}
-	for i := 0; i < len(availableWorkerSlotQueue); i++ {
-		availableWorkerSlotQueue[i] = availableWorkerSlot{
-			index:          i,
-			randomProvider: randomutils.ForkRandomProvider(f.randomProvider),
+	f.workers = make([]*FuzzerWorker, f.config.Fuzzing.Workers)
+	slots := make(chan workerSlot, len(f.workers))
+	for i := range f.workers {
+		slots <- workerSlot{i, randomutils.ForkRandomProvider(f.randomProvider)}
+	}
+	var workers sync.WaitGroup
+	var errorLock sync.Mutex
+	var firstError error
+	recordError := func(err error) {
+		if err == nil {
+			return
 		}
-	}
-
-	// Define a flag that indicates whether we have cancelled fuzzing or not
-	working := !utils.CheckContextDone(f.ctx)
-
-	// Create workers and start fuzzing.
-	var err error
-	for err == nil && working {
-		// Send an item into our channel to queue up a spot. This will block us if we hit capacity until a worker
-		// slot is freed up.
-		threadReserveChannel <- struct{}{}
-
-		// Pop a worker index off of our queue
-		availableWorkerIndexedLock.Lock()
-		workerSlotInfo := availableWorkerSlotQueue[0]
-		availableWorkerSlotQueue = availableWorkerSlotQueue[1:]
-		availableWorkerIndexedLock.Unlock()
-
-		// Run our goroutine. This should take our queued struct out of the channel once it's done,
-		// keeping us at our desired thread capacity. If we encounter an error, we store it and continue
-		// processing the cleanup logic to exit gracefully.
-		go func(workerSlotInfo availableWorkerSlot) {
-			// Create a new worker for this fuzzing.
-			worker, workerCreatedErr := newFuzzerWorker(f, workerSlotInfo.index, workerSlotInfo.randomProvider)
-			f.workers[workerSlotInfo.index] = worker
-			if err == nil && workerCreatedErr != nil {
-				err = workerCreatedErr
-			}
-
-			if err == nil {
-				// Publish an event indicating we created a worker.
-				workerCreatedErr = f.Events.WorkerCreated.Publish(FuzzerWorkerCreatedEvent{Worker: worker})
-				if err == nil && workerCreatedErr != nil {
-					err = workerCreatedErr
-				}
-			}
-
-			// Run the worker and check if we received a cancelled signal, or we encountered an error.
-			if err == nil {
-				ctxCancelled, workerErr := worker.run(baseTestChain)
-				if workerErr != nil {
-					err = workerErr
-				}
-
-				// If we received a cancelled signal, signal our exit from the working loop.
-				if working && ctxCancelled {
-					working = false
-				}
-			}
-
-			// Free our worker id before unblocking our channel, as a free one will be expected.
-			availableWorkerIndexedLock.Lock()
-			availableWorkerSlotQueue = append(availableWorkerSlotQueue, workerSlotInfo)
-			availableWorkerIndexedLock.Unlock()
-
-			// Publish an event indicating we destroyed a worker.
-			workerDestroyedErr := f.Events.WorkerDestroyed.Publish(FuzzerWorkerDestroyedEvent{Worker: worker})
-			if err == nil && workerDestroyedErr != nil {
-				err = workerDestroyedErr
-			}
-
-			// Unblock our channel by freeing our capacity of another item, making way for another worker.
-			<-threadReserveChannel
-		}(workerSlotInfo)
-	}
-
-	// Explicitly call cancel on our emergency context to ensure all threads exit if we encountered an error.
-	if err != nil {
+		errorLock.Lock()
+		if firstError == nil {
+			firstError = err
+		}
+		errorLock.Unlock()
 		f.Terminate()
 	}
-
-	// Wait for every worker to be freed, so we don't have a race condition when reporting the order
-	// of events to our test provider.
+launch:
 	for {
-		// Obtain the count of free workers.
-		availableWorkerIndexedLock.Lock()
-		freeWorkers := len(availableWorkerSlotQueue)
-		availableWorkerIndexedLock.Unlock()
-
-		// We keep waiting until every worker is free
-		if freeWorkers == len(f.workers) {
-			break
-		} else {
-			time.Sleep(50 * time.Millisecond)
+		select {
+		case <-f.ctx.Done():
+			break launch
+		case slot := <-slots:
+			if utils.CheckContextDone(f.ctx) {
+				break launch
+			}
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				worker, err := newFuzzerWorker(f, slot.index, slot.randomProvider)
+				f.workers[slot.index] = worker
+				if err == nil {
+					err = f.Events.WorkerCreated.Publish(FuzzerWorkerCreatedEvent{Worker: worker})
+				}
+				if err == nil {
+					var cancelled bool
+					cancelled, err = worker.run(baseTestChain)
+					if cancelled {
+						f.Stop()
+					}
+				}
+				recordError(err)
+				if worker != nil {
+					recordError(f.Events.WorkerDestroyed.Publish(FuzzerWorkerDestroyedEvent{Worker: worker}))
+				}
+				// Reuse this index only after its final callback has finished.
+				select {
+				case slots <- slot:
+				case <-f.ctx.Done():
+				}
+			}()
 		}
 	}
-	return err
+	workers.Wait()
+	return firstError
 }
 
 // Start begins a fuzzing operation on the provided project configuration. This operation will not return until an error
@@ -1061,12 +1017,26 @@ func (f *Fuzzer) Start() error {
 
 	// Create our main and emergency running context (allows us to cancel across threads)
 	f.ctx, f.ctxCancelFunc = context.WithCancel(context.Background())
+	defer f.ctxCancelFunc()
 	f.emergencyCtx, f.emergencyCtxCancelFunc = context.WithCancel(context.Background())
+	defer f.emergencyCtxCancelFunc()
 
 	// If we set a timeout, create the timeout context now, as we're about to begin fuzzing.
 	if f.config.Fuzzing.Timeout > 0 {
 		f.logger.Info("Running with a timeout of ", colors.Bold, f.config.Fuzzing.Timeout, " seconds")
 		f.ctx, f.ctxCancelFunc = context.WithTimeout(f.ctx, time.Duration(f.config.Fuzzing.Timeout)*time.Second)
+		defer f.ctxCancelFunc()
+	}
+
+	monitorCtx, stopMonitoring := context.WithCancel(f.ctx)
+	var monitoring sync.WaitGroup
+	defer func() {
+		stopMonitoring()
+		monitoring.Wait()
+	}()
+	startMonitor := func(run func()) {
+		monitoring.Add(1)
+		go func() { defer monitoring.Done(); run() }()
 	}
 
 	// Start the revert reporter
@@ -1119,7 +1089,7 @@ func (f *Fuzzer) Start() error {
 		f.logger.Info("Initializing corpus...")
 
 		// Monitor corpus initialization
-		go f.monitorCorpusInitialization()
+		startMonitor(func() { f.monitorCorpusInitialization(monitorCtx, f.corpus) })
 	}
 
 	// Start the corpus pruner.
@@ -1133,7 +1103,7 @@ func (f *Fuzzer) Start() error {
 	f.logger.Info("Fuzzing with ", colors.Bold, f.config.Fuzzing.Workers, colors.Reset, " workers")
 
 	// Start our printing loop now that we're about to begin fuzzing.
-	go f.printMetricsLoop()
+	startMonitor(func() { f.printMetricsLoop(monitorCtx, f.corpus) })
 
 	// Publish a fuzzer starting event.
 	err = f.Events.FuzzerStarting.Publish(FuzzerStartingEvent{Fuzzer: f})
@@ -1154,6 +1124,9 @@ func (f *Fuzzer) Start() error {
 
 	// Run the main worker loop
 	err = f.spawnWorkersLoop(baseTestChain)
+	// Debug monitoring reads compilation maps that final reporting may update.
+	stopMonitoring()
+	monitoring.Wait()
 	if err != nil {
 		f.logger.Error("Encountered an error in the main fuzzing loop", err)
 	}
@@ -1230,9 +1203,10 @@ func (f *Fuzzer) Start() error {
 	}
 
 	// Generate the revert metrics artifacts
-	err = f.revertReporter.BuildArtifacts()
-	if err != nil {
-		f.logger.Error("Failed to write reversion metrics to disk", err)
+	artifactErr := f.revertReporter.BuildArtifacts()
+	if artifactErr != nil {
+		f.logger.Error("Failed to write reversion metrics to disk", artifactErr)
+		err = errors.Join(err, artifactErr)
 	}
 
 	// Return any encountered error.
@@ -1266,26 +1240,30 @@ func (f *Fuzzer) Terminate() {
 
 // monitorCorpusInitialization monitors the corpus initialization process and logs the corpus health when it is complete.
 // This goroutine is short-lived and exits when the corpus is initialized.
-func (f *Fuzzer) monitorCorpusInitialization() {
+func (f *Fuzzer) monitorCorpusInitialization(ctx context.Context, runCorpus *corpus.Corpus) {
 	// There is nothing to do if there are no corpus elements or unexecuted call sequences
-	totalSequences, totalTestResults := f.corpus.CallSequenceEntryCount()
-	if !f.corpus.InitializingCorpus() || totalSequences == 0 || totalTestResults == 0 {
+	totalSequences, totalTestResults := runCorpus.CallSequenceEntryCount()
+	if !runCorpus.InitializingCorpus() || totalSequences == 0 || totalTestResults == 0 {
 		return
 	}
 
 	// Capture an approximate start time
 	startTime := time.Now()
-	for !utils.CheckContextDone(f.ctx) && !utils.CheckContextDone(f.emergencyCtx) {
+	for !utils.CheckContextDone(ctx) && !utils.CheckContextDone(f.emergencyCtx) {
 		// Go to sleep if corpus is still initializing
-		if f.corpus.InitializingCorpus() {
-			time.Sleep(200 * time.Millisecond)
+		if runCorpus.InitializingCorpus() {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(200 * time.Millisecond):
+			}
 			continue
 		}
 
 		// Calculate the necessary variables for corpus health
-		totalSequences, totalTestResults := f.corpus.CallSequenceEntryCount()
+		totalSequences, totalTestResults := runCorpus.CallSequenceEntryCount()
 		totalCorpusEntries := totalSequences + totalTestResults
-		validSequences := f.corpus.ValidCallSequences()
+		validSequences := runCorpus.ValidCallSequences()
 		invalidSequences := int(totalSequences - int(validSequences))
 
 		// Log how much time it took to initialize the corpus
@@ -1304,7 +1282,7 @@ func (f *Fuzzer) monitorCorpusInitialization() {
 }
 
 // printMetricsLoop prints metrics to the console in a loop until ctx signals a stopped operation.
-func (f *Fuzzer) printMetricsLoop() {
+func (f *Fuzzer) printMetricsLoop(ctx context.Context, runCorpus *corpus.Corpus) {
 	// Define our start time
 	startTime := time.Now()
 
@@ -1315,7 +1293,7 @@ func (f *Fuzzer) printMetricsLoop() {
 	lastGasUsed := big.NewInt(0)
 
 	lastPrintedTime := time.Time{}
-	for !utils.CheckContextDone(f.ctx) {
+	for !utils.CheckContextDone(ctx) {
 		// Obtain our metrics
 		callsTested := f.metrics.CallsTested()
 		sequencesTested := f.metrics.SequencesTested()
@@ -1344,8 +1322,8 @@ func (f *Fuzzer) printMetricsLoop() {
 		logBuffer.Append("elapsed: ", colors.Bold, fmt.Sprintf("%8s", formatDuration(time.Since(startTime))), colors.Reset)
 		logBuffer.Append(", calls: ", colors.Bold, fmt.Sprintf("%10d (%6d/sec)", callsTested, callsPerSec), colors.Reset)
 		logBuffer.Append(", seq/s: ", colors.Bold, fmt.Sprintf("%6d", seqPerSec), colors.Reset)
-		logBuffer.Append(", branches: ", colors.Bold, fmt.Sprintf("%6d", f.corpus.CoverageMaps().BranchesHit()), colors.Reset)
-		logBuffer.Append(", corpus: ", colors.Bold, fmt.Sprintf("%5d", f.corpus.ActiveMutableSequenceCount()), colors.Reset)
+		logBuffer.Append(", branches: ", colors.Bold, fmt.Sprintf("%6d", runCorpus.CoverageMaps().BranchesHit()), colors.Reset)
+		logBuffer.Append(", corpus: ", colors.Bold, fmt.Sprintf("%5d", runCorpus.ActiveMutableSequenceCount()), colors.Reset)
 		logBuffer.Append(", failures: ", colors.Bold, fmt.Sprintf("%d/%d", failedSequences, sequencesTested), colors.Reset)
 		logBuffer.Append(", gas/s: ", colors.Bold, fmt.Sprintf("%12d", gasPerSec), colors.Reset)
 		if f.logger.Level() <= zerolog.DebugLevel {
@@ -1356,7 +1334,7 @@ func (f *Fuzzer) printMetricsLoop() {
 
 			if time.Since(f.lastPCsLogMsg) >= timeBetweenPCsLogMsgs {
 				start := time.Now()
-				totalPCs, err := coverage.GetUniquePCsCount(f.compilations, f.corpus.CoverageMaps(), f.logger)
+				totalPCs, err := coverage.GetUniquePCsCount(f.compilations, runCorpus.CoverageMaps(), f.logger)
 				// This is just for a log message. This shouldn't error but if it does we don't need to exit out
 				if err == nil {
 					end := time.Now()
@@ -1385,7 +1363,11 @@ func (f *Fuzzer) printMetricsLoop() {
 		}
 
 		// Sleep some time between print iterations
-		time.Sleep(time.Second * 3)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(3 * time.Second):
+		}
 	}
 }
 

@@ -3,6 +3,7 @@ package fuzzing
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/crytic/medusa-geth/accounts/abi"
 	"github.com/crytic/medusa/fuzzing/calls"
@@ -14,6 +15,7 @@ import (
 
 // PropertyTestCase describes a test being run by a PropertyTestCaseProvider.
 type PropertyTestCase struct {
+	resultLock sync.RWMutex
 	// status describes the status of the test case
 	status TestCaseStatus
 	// targetContract describes the target contract where the test case was found
@@ -28,12 +30,16 @@ type PropertyTestCase struct {
 
 // Status describes the TestCaseStatus used to define the current state of the test.
 func (t *PropertyTestCase) Status() TestCaseStatus {
+	t.resultLock.RLock()
+	defer t.resultLock.RUnlock()
 	return t.status
 }
 
 // CallSequence describes the types.CallSequence of calls sent to the EVM which resulted in this TestCase result.
 // This should be nil if the result is not related to the CallSequence.
 func (t *PropertyTestCase) CallSequence() *calls.CallSequence {
+	t.resultLock.RLock()
+	defer t.resultLock.RUnlock()
 	return t.callSequence
 }
 
@@ -45,23 +51,27 @@ func (t *PropertyTestCase) Name() string {
 // LogMessage obtains a buffer that represents the result of the PropertyTestCase. This buffer can be passed to a logger for
 // console or file logging.
 func (t *PropertyTestCase) LogMessage() *logging.LogBuffer {
+	t.resultLock.RLock()
+	status, sequence := t.status, t.callSequence
+	trace := t.propertyTestTrace
+	t.resultLock.RUnlock()
 	// If the test failed, return a failure message.
 	buffer := logging.NewLogBuffer()
-	if t.Status() == TestCaseStatusFailed {
-		buffer.Append(colors.RedBold, fmt.Sprintf("[%s] ", t.Status()), colors.Bold, t.Name(), colors.Reset, "\n")
+	if status == TestCaseStatusFailed {
+		buffer.Append(colors.RedBold, fmt.Sprintf("[%s] ", status), colors.Bold, t.Name(), colors.Reset, "\n")
 		buffer.Append(fmt.Sprintf("Test for method \"%s.%s\" failed after the following call sequence:\n", t.targetContract.Name(), t.targetMethod.Sig))
 		buffer.Append(colors.Bold, "[Call Sequence]", colors.Reset, "\n")
-		buffer.Append(t.CallSequence().Log().Elements()...)
+		buffer.Append(sequence.Log().Elements()...)
 
 		// If an execution trace is attached then add it to the message
-		if t.propertyTestTrace != nil {
+		if trace != nil {
 			buffer.Append(colors.Bold, "[Property Test Execution Trace]", colors.Reset, "\n")
-			buffer.Append(t.propertyTestTrace.Log().Elements()...)
+			buffer.Append(trace.Log().Elements()...)
 		}
 		return buffer
 	}
 
-	buffer.Append(colors.GreenBold, fmt.Sprintf("[%s] ", t.Status()), colors.Bold, t.Name(), colors.Reset)
+	buffer.Append(colors.GreenBold, fmt.Sprintf("[%s] ", status), colors.Bold, t.Name(), colors.Reset)
 	return buffer
 }
 
@@ -74,4 +84,31 @@ func (t *PropertyTestCase) Message() string {
 // ID obtains a unique identifier for a test result.
 func (t *PropertyTestCase) ID() string {
 	return strings.ReplaceAll(fmt.Sprintf("PROPERTY-%s-%s", t.targetContract.Name(), t.targetMethod.Sig), "_", "-")
+}
+
+func (t *PropertyTestCase) markRunning() {
+	t.resultLock.Lock()
+	defer t.resultLock.Unlock()
+	if t.status == TestCaseStatusNotStarted {
+		t.status = TestCaseStatusRunning
+	}
+}
+func (t *PropertyTestCase) markPassed() {
+	t.resultLock.Lock()
+	defer t.resultLock.Unlock()
+	if t.status == TestCaseStatusRunning {
+		t.status = TestCaseStatusPassed
+	}
+}
+
+func (t *PropertyTestCase) tryFinalizeFailure(sequence *calls.CallSequence, trace *executiontracer.ExecutionTrace) bool {
+	t.resultLock.Lock()
+	defer t.resultLock.Unlock()
+	if t.status == TestCaseStatusFailed {
+		return false
+	}
+	t.callSequence = sequence
+	t.propertyTestTrace = trace
+	t.status = TestCaseStatusFailed
+	return true
 }

@@ -308,12 +308,18 @@ func (c *Corpus) RandomMutationTargetSequence() (calls.CallSequence, error) {
 // addCallSequence adds a call sequence to the corpus in a given corpus directory.
 // Returns an error, if one occurs.
 func (c *Corpus) addCallSequence(sequenceFiles *corpusDirectory[calls.CallSequence], sequence calls.CallSequence, useInMutations bool, mutationChooserWeight *big.Int, flushImmediately bool) error {
+	// Workers keep executing and shrinking their messages after publishing them.
+	sequence, err := sequence.Clone()
+	if err != nil {
+		return err
+	}
 	// Acquire a thread lock during modification of call sequence lists.
 	c.callSequencesLock.Lock()
 
 	// Check if call sequence has been added before, if so, exit without any action.
 	seqHash, err := sequence.Hash()
 	if err != nil {
+		c.callSequencesLock.Unlock()
 		return err
 	}
 
@@ -337,6 +343,7 @@ func (c *Corpus) addCallSequence(sequenceFiles *corpusDirectory[calls.CallSequen
 	fileName := fmt.Sprintf("%v-%v.json", time.Now().UnixNano(), uuid.New().String())
 	err = sequenceFiles.addFile(fileName, sequence)
 	if err != nil {
+		c.callSequencesLock.Unlock()
 		return err
 	}
 
@@ -416,6 +423,10 @@ func (c *Corpus) CheckSequenceCoverageAndUpdate(callSequence calls.CallSequence,
 
 // MarkCallSequenceForMutation records that a call sequence in the corpus has been successfully executed and can be used for mutations.
 func (c *Corpus) MarkCallSequenceForMutation(sequence calls.CallSequence, mutationChooserWeight *big.Int) error {
+	sequence, err := sequence.Clone()
+	if err != nil {
+		return err
+	}
 	// If no weight is provided, set it to 1.
 	if mutationChooserWeight == nil {
 		mutationChooserWeight = big.NewInt(1)
@@ -583,7 +594,9 @@ func (c *Corpus) PruneSequences(ctx context.Context, chain *chain.TestChain) (in
 		}
 	}
 
+	c.callSequencesLock.Lock()
 	c.mutationTargetSequenceChooser.RemoveChoices(toRemove)
+	c.callSequencesLock.Unlock()
 	return len(toRemove), nil
 }
 
