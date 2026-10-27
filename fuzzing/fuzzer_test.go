@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync/atomic"
 	"testing"
 
 	"github.com/crytic/medusa/utils"
@@ -36,19 +37,19 @@ func TestFuzzerHooks(t *testing.T) {
 		},
 		method: func(f *fuzzerTestContext) {
 			// Attach to fuzzer hooks which simply set a success state.
-			var valueGenOk, chainSetupOk, callSeqTestFuncOk bool
+			var valueGenOk, chainSetupOk, callSeqTestFuncOk atomic.Bool
 			existingSeqGenConfigFunc := f.fuzzer.Hooks.NewCallSequenceGeneratorConfigFunc
 			f.fuzzer.Hooks.NewCallSequenceGeneratorConfigFunc = func(fuzzer *Fuzzer, valueSet *valuegeneration.ValueSet, randomProvider *rand.Rand) (*CallSequenceGeneratorConfig, error) {
-				valueGenOk = true
+				valueGenOk.Store(true)
 				return existingSeqGenConfigFunc(fuzzer, valueSet, randomProvider)
 			}
 			existingChainSetupFunc := f.fuzzer.Hooks.ChainSetupFunc
 			f.fuzzer.Hooks.ChainSetupFunc = func(fuzzer *Fuzzer, testChain *chain.TestChain) (*executiontracer.ExecutionTrace, error) {
-				chainSetupOk = true
+				chainSetupOk.Store(true)
 				return existingChainSetupFunc(fuzzer, testChain)
 			}
 			f.fuzzer.Hooks.CallSequenceTestFuncs = append(f.fuzzer.Hooks.CallSequenceTestFuncs, func(worker *FuzzerWorker, callSequence calls.CallSequence) ([]ShrinkCallSequenceRequest, error) {
-				callSeqTestFuncOk = true
+				callSeqTestFuncOk.Store(true)
 				return make([]ShrinkCallSequenceRequest, 0), nil
 			})
 
@@ -60,9 +61,9 @@ func TestFuzzerHooks(t *testing.T) {
 			assertFailedTestsExpected(f, true)
 
 			// Assert that our hooks worked
-			assert.True(t, valueGenOk, "could not hook value generator func")
-			assert.True(t, chainSetupOk, "could not hook chain setup func")
-			assert.True(t, callSeqTestFuncOk, "could not hook call sequence test func")
+			assert.True(t, valueGenOk.Load(), "could not hook value generator func")
+			assert.True(t, chainSetupOk.Load(), "could not hook chain setup func")
+			assert.True(t, callSeqTestFuncOk.Load(), "could not hook call sequence test func")
 		},
 	})
 }
