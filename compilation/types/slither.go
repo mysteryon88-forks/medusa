@@ -1,6 +1,7 @@
 package types
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -84,6 +85,14 @@ func (s *SlitherConfig) getArgs(target string) ([]string, error) {
 // cache if we have not written to the cache already. A SlitherResults data structure is returned.
 // The solcVersion parameter, if non-empty, sets the SOLC_VERSION environment variable to prevent race conditions.
 func (s *SlitherConfig) RunSlither(target string, solcVersion string) (*SlitherResults, error) {
+	return s.RunSlitherContext(context.Background(), target, solcVersion)
+}
+
+// RunSlitherContext cancels Slither execution while retaining separate JSON and diagnostic streams.
+func (s *SlitherConfig) RunSlitherContext(ctx context.Context, target string, solcVersion string) (*SlitherResults, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Return early if we do not want to run slither
 	if !s.UseSlither {
 		return nil, nil
@@ -133,7 +142,7 @@ func (s *SlitherConfig) RunSlither(target string, solcVersion string) (*SlitherR
 
 		// Run slither while keeping diagnostics separate from the JSON output.
 		start := time.Now()
-		out, err = runSlitherCommand(cmd)
+		out, err = runSlitherCommandContext(ctx, cmd)
 		if err != nil {
 			return nil, err
 		}
@@ -149,6 +158,9 @@ func (s *SlitherConfig) RunSlither(target string, solcVersion string) (*SlitherR
 
 	// Cache the results if we have not cached before. We have also already checked that the output is well-formed
 	// (through unmarshal) so we should be safe.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !haveCachedResults && s.CachePath != "" {
 		// Cache the data
 		err = os.WriteFile(s.CachePath, out, 0644)
@@ -169,7 +181,11 @@ func (s *SlitherConfig) RunSlither(target string, solcVersion string) (*SlitherR
 
 // runSlitherCommand runs Slither and returns only stdout so stderr diagnostics cannot corrupt its JSON output.
 func runSlitherCommand(cmd *exec.Cmd) ([]byte, error) {
-	stdout, _, combined, err := utils.RunCommandWithOutputAndError(cmd)
+	return runSlitherCommandContext(context.Background(), cmd)
+}
+
+func runSlitherCommandContext(ctx context.Context, cmd *exec.Cmd) ([]byte, error) {
+	stdout, _, combined, err := utils.RunCommandWithContext(ctx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("error while executing slither: %w\n\nCommand Output:\n%s", err, string(combined))
 	}

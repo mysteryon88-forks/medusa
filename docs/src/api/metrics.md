@@ -29,7 +29,7 @@ alone is not a completion barrier. The final sample remains stable until the nex
 sequential `Start()`, which resets telemetry and coverage readiness. Concurrent
 calls to `Start()` on the same fuzzer are unsupported.
 
-The buildable [metrics example](https://github.com/crytic/medusa/tree/master/examples/metrics)
+The buildable example in `examples/metrics/main.go`
 uses a ticker, a buffered completion channel and a final sample. Run it with
 `go run ./examples/metrics path/to/medusa.json`. Counter values in its JSON samples
 are decimal strings to retain integers larger than 64 bits. Normal Medusa logs

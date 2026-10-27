@@ -1,6 +1,7 @@
 package platforms
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -40,10 +41,15 @@ func (s *SolcCompilationConfig) SetTarget(newTarget string) {
 }
 
 func GetSystemSolcVersion() (*semver.Version, error) {
+	return GetSystemSolcVersionContext(context.Background())
+}
+
+// GetSystemSolcVersionContext obtains the compiler version with cancellation.
+func GetSystemSolcVersionContext(ctx context.Context) (*semver.Version, error) {
 	// Run solc --version to obtain our compiler version.
-	out, err := exec.Command("solc", "--version").CombinedOutput()
+	_, _, out, err := utils.RunCommandWithContext(ctx, exec.Command("solc", "--version"))
 	if err != nil {
-		return nil, fmt.Errorf("error while executing solc:\nOUTPUT:\n%s\nERROR: %s", string(out), err.Error())
+		return nil, fmt.Errorf("error while executing solc:\nOUTPUT:\n%s\nERROR: %w", string(out), err)
 	}
 
 	// Parse the compiler version out of the output
@@ -79,8 +85,13 @@ func (s *SolcCompilationConfig) SetSolcOutputOptions(v *semver.Version) string {
 	}
 }
 func (s *SolcCompilationConfig) Compile() ([]types.Compilation, string, error) {
+	return s.CompileContext(context.Background())
+}
+
+// CompileContext compiles a Solidity target with cancellable version discovery and execution.
+func (s *SolcCompilationConfig) CompileContext(ctx context.Context) ([]types.Compilation, string, error) {
 	// Obtain our solc version string
-	v, err := GetSystemSolcVersion()
+	v, err := GetSystemSolcVersionContext(ctx)
 	if err != nil {
 		return nil, "", err
 	}
@@ -90,9 +101,9 @@ func (s *SolcCompilationConfig) Compile() ([]types.Compilation, string, error) {
 
 	// Create our command
 	cmd := exec.Command("solc", s.Target, "--combined-json", outputOptions)
-	cmdStdout, cmdStderr, cmdCombined, err := utils.RunCommandWithOutputAndError(cmd)
+	cmdStdout, cmdStderr, cmdCombined, err := utils.RunCommandWithContext(ctx, cmd)
 	if err != nil {
-		return nil, "", fmt.Errorf("error while executing solc:\n%s\n\nCommand Output:\n%s", err.Error(), string(cmdCombined))
+		return nil, "", fmt.Errorf("error while executing solc:\n%w\n\nCommand Output:\n%s", err, string(cmdCombined))
 	}
 
 	// Our compilation succeeded, load the JSON
@@ -204,5 +215,8 @@ func (s *SolcCompilationConfig) Compile() ([]types.Compilation, string, error) {
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
 	return []types.Compilation{*compilation}, string(cmdStderr), nil
 }

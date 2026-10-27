@@ -153,6 +153,15 @@ const blockGasLimit = 0x0FFFFFFFFFFFFFFF
 // NewFuzzer returns an instance of a new Fuzzer provided a project configuration, or an error if one is encountered
 // while initializing the code.
 func NewFuzzer(config config.ProjectConfig) (*Fuzzer, error) {
+	return NewFuzzerWithContext(context.Background(), config)
+}
+
+// NewFuzzerWithContext cancels preparation, including compilation and Slither.
+// Its context does not control a later Start; runtime Stop and Terminate are unchanged.
+func NewFuzzerWithContext(ctx context.Context, config config.ProjectConfig) (*Fuzzer, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Disable colors if requested
 	if config.Logging.NoColor {
 		colors.DisableColor()
@@ -246,12 +255,15 @@ func NewFuzzer(config config.ProjectConfig) (*Fuzzer, error) {
 		// Compile the targets specified in the compilation config
 		fuzzer.logger.Info("Compiling targets with ", colors.Bold, fuzzer.config.Compilation.Platform, colors.Reset)
 		start := time.Now()
-		compilations, _, err := (*fuzzer.config.Compilation).Compile()
+		compilations, _, err := fuzzer.config.Compilation.CompileContext(ctx)
 		if err != nil {
 			fuzzer.logger.Error("Failed to compile target", err)
 			return nil, err
 		}
 		fuzzer.logger.Info("Finished compiling targets in ", time.Since(start).Round(time.Second))
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 
 		// Notify user about artifact hash status (new vs unchanged artifacts)
 		cacheDir := fuzzer.config.Fuzzing.CorpusDirectory
@@ -261,7 +273,9 @@ func NewFuzzer(config config.ProjectConfig) (*Fuzzer, error) {
 		compilation.NotifyArtifactHashStatus(compilations, cacheDir, fuzzer.logger)
 
 		// Add our compilation targets
-		fuzzer.AddCompilationTargets(compilations)
+		if err := fuzzer.addCompilationTargetsContext(ctx, compilations); err != nil {
+			return nil, err
+		}
 	}
 
 	// Provide any custom errors in the compiled artifacts' ABIs to the revert reporter now
@@ -276,6 +290,9 @@ func NewFuzzer(config config.ProjectConfig) (*Fuzzer, error) {
 	}
 	if fuzzer.config.Fuzzing.Testing.OptimizationTesting.Enabled {
 		attachOptimizationTestCaseProvider(fuzzer)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return fuzzer, nil
 }
@@ -467,11 +484,26 @@ func (f *Fuzzer) ReportTestCaseFinished(testCase TestCase) {
 // AddCompilationTargets takes a compilation and updates the Fuzzer state with additional Fuzzer.ContractDefinitions
 // definitions and Fuzzer.BaseValueSet values.
 func (f *Fuzzer) AddCompilationTargets(compilations []compilationTypes.Compilation) {
+	if err := f.addCompilationTargetsContext(context.Background(), compilations); err != nil {
+		f.logger.Warn("Failed to add compilation targets", err)
+	}
+}
+
+func (f *Fuzzer) addCompilationTargetsContext(ctx context.Context, compilations []compilationTypes.Compilation) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var seedFromAST bool
 
 	// No need to handle the error here since having compilation artifacts implies that we used a supported
 	// platform configuration
-	platformConfig, _ := f.config.Compilation.GetPlatformConfig()
+	if f.config.Compilation == nil {
+		return errors.New("compilation configuration is required to add targets")
+	}
+	platformConfig, err := f.config.Compilation.GetPlatformConfig()
+	if err != nil {
+		return err
+	}
 
 	// Retrieve the compilation target for slither
 	target := platformConfig.GetTarget()
@@ -483,7 +515,10 @@ func (f *Fuzzer) AddCompilationTargets(compilations []compilationTypes.Compilati
 	}
 
 	// Run slither and handle errors
-	slitherResults, err := f.config.Slither.RunSlither(target, solcVersion)
+	slitherResults, err := f.config.Slither.RunSlitherContext(ctx, target, solcVersion)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, utils.ErrCommandControl) || ctx.Err() != nil {
+		return errors.Join(err, ctx.Err())
+	}
 	if err != nil || slitherResults == nil {
 		if err != nil {
 			f.logger.Warn("Failed to run slither", err)
@@ -505,6 +540,9 @@ func (f *Fuzzer) AddCompilationTargets(compilations []compilationTypes.Compilati
 
 	// Capture all the contract definitions, functions, and cache the source code
 	for i := 0; i < len(compilations); i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		// Add our compilation to the list and get a reference to it.
 		f.compilations = append(f.compilations, compilations[i])
 		compilation := &f.compilations[len(f.compilations)-1]
@@ -586,6 +624,7 @@ func (f *Fuzzer) AddCompilationTargets(compilations []compilationTypes.Compilati
 	if err != nil {
 		f.logger.Warn("Could not get a deployment order", err)
 	}
+	return ctx.Err()
 }
 
 // createTestChain creates a test chain with the account balance allocations specified by the config.

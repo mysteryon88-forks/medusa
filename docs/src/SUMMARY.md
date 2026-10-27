@@ -39,6 +39,7 @@
 
 - [API Overview (WIP)](api/api_overview.md)
 - [Campaign metrics](api/metrics.md)
+- [Cancelling preparation](api/context.md)
 
 # Appendices
 
