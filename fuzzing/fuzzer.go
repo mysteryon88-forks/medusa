@@ -1075,18 +1075,23 @@ func (f *Fuzzer) Start() error {
 	}
 
 	monitorCtx, stopMonitoring := context.WithCancel(f.ctx)
+	reporterCtx, stopReporter := context.WithCancel(context.Background())
 	var monitoring sync.WaitGroup
-	defer func() {
+	stopServices := func() {
 		stopMonitoring()
+		stopReporter()
 		monitoring.Wait()
-	}()
+		f.corpusPruner.Wait()
+		f.revertReporter.Wait()
+	}
+	defer stopServices()
 	startMonitor := func(run func()) {
 		monitoring.Add(1)
 		go func() { defer monitoring.Done(); run() }()
 	}
 
 	// Start the revert reporter
-	f.revertReporter.Start(f.ctx)
+	f.revertReporter.Start(reporterCtx)
 
 	// Initialize our test cases and providers
 	f.testCasesLock.Lock()
@@ -1146,7 +1151,7 @@ func (f *Fuzzer) Start() error {
 	}
 
 	// Start the corpus pruner.
-	err = f.corpusPruner.Start(f.ctx, f.corpus, baseTestChain)
+	err = f.corpusPruner.Start(monitorCtx, f.corpus, baseTestChain)
 	if err != nil {
 		f.logger.Error("Error starting corpus pruner", err)
 		return err
@@ -1178,8 +1183,7 @@ func (f *Fuzzer) Start() error {
 	// Run the main worker loop
 	err = f.spawnWorkersLoop(baseTestChain)
 	// Debug monitoring reads compilation maps that final reporting may update.
-	stopMonitoring()
-	monitoring.Wait()
+	stopServices()
 	if err != nil {
 		f.logger.Error("Encountered an error in the main fuzzing loop", err)
 	}

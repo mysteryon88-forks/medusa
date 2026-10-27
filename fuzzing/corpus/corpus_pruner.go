@@ -3,6 +3,7 @@ package corpus
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/crytic/medusa/chain"
@@ -14,6 +15,7 @@ import (
 // CorpusPruner is a job that runs every `PruneFrequency` minutes.
 // It removes unnecessary items from the corpus by calling `Corpus.PruneSequences`.
 type CorpusPruner struct {
+	running sync.WaitGroup
 	// enabled determines if the pruner is enabled
 	enabled bool
 
@@ -100,14 +102,19 @@ func (cp *CorpusPruner) Start(ctx context.Context, corpus *Corpus, baseTestChain
 	if err != nil {
 		return err
 	}
-	cp.chain = clonedChain
-
-	// Write our params to the struct so we don't have to pass them all over the place as function args.
-	cp.ctx = ctx
-	cp.corpus = corpus
-
-	// Start up the main loop in a goroutine.
-	go cp.mainLoop()
+	// Each loop owns its inputs and clone, even if the controller is reused before it exits.
+	run := &CorpusPruner{
+		ctx: ctx, corpus: corpus, chain: clonedChain, logger: cp.logger, pruneFrequency: cp.pruneFrequency,
+	}
+	cp.running.Add(1)
+	go func() {
+		defer cp.running.Done()
+		run.mainLoop()
+	}()
 
 	return nil
 }
+
+// Wait joins started pruning loops, including closure of their cloned chains.
+// Cancel their contexts before waiting; Wait does not request cancellation.
+func (cp *CorpusPruner) Wait() { cp.running.Wait() }
