@@ -81,6 +81,10 @@ type Fuzzer struct {
 	workers []*FuzzerWorker
 	// metrics represents the metrics for the fuzzing campaign.
 	metrics *FuzzerMetrics
+	// metricsLock publishes counters and coverage from the same run to polling clients.
+	metricsLock     sync.Mutex
+	metricsCoverage *coverage.CoverageMaps
+	metricsFinal    *FuzzerMetricsSnapshot
 	// corpus stores a list of transaction sequences that can be used for coverage-guided fuzzing
 	corpus *corpus.Corpus
 
@@ -1011,6 +1015,12 @@ launch:
 func (f *Fuzzer) Start() error {
 	// Define our variable to catch errors
 	var err error
+	f.metricsLock.Lock()
+	f.metrics = newFuzzerMetrics(f.config.Fuzzing.Workers, f.revertReporter.RevertMetricsCh)
+	f.metricsCoverage = nil
+	f.metricsFinal = nil
+	f.metricsLock.Unlock()
+	defer f.freezeMetrics()
 
 	// While we're fuzzing, we'll want to have an initialized random provider.
 	f.randomProvider = rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -1041,9 +1051,6 @@ func (f *Fuzzer) Start() error {
 
 	// Start the revert reporter
 	f.revertReporter.Start(f.ctx)
-
-	// Initialize our metrics and valueGenerator.
-	f.metrics = newFuzzerMetrics(f.config.Fuzzing.Workers, f.revertReporter.RevertMetricsCh)
 
 	// Initialize our test cases and providers
 	f.testCasesLock.Lock()
@@ -1082,6 +1089,11 @@ func (f *Fuzzer) Start() error {
 	if err != nil {
 		f.logger.Error("Failed to initialize the corpus", err)
 		return err
+	}
+	if f.config.Fuzzing.CoverageEnabled {
+		f.metricsLock.Lock()
+		f.metricsCoverage = f.corpus.CoverageMaps()
+		f.metricsLock.Unlock()
 	}
 
 	// Log that we will initialize corpus if there are any call sequences or test results
@@ -1316,12 +1328,18 @@ func (f *Fuzzer) printMetricsLoop(ctx context.Context, runCorpus *corpus.Corpus)
 	lastPrintedTime := time.Time{}
 	for !utils.CheckContextDone(ctx) {
 		// Obtain our metrics
-		callsTested := f.metrics.CallsTested()
-		sequencesTested := f.metrics.SequencesTested()
-		gasUsed := f.metrics.GasUsed()
-		failedSequences := f.metrics.FailedSequences()
-		workerStartupCount := f.metrics.WorkerStartupCount()
-		workersShrinking := f.metrics.WorkersShrinkingCount()
+		sample := f.Metrics()
+		callsTested := sample.CallsTested()
+		sequencesTested := sample.SequencesTested()
+		gasUsed := sample.GasUsed()
+		failedSequences := sample.FailedSequences()
+		workerStartupCount := sample.WorkerStartupCount()
+		workersShrinking := sample.WorkersShrinkingCount()
+		markers, coverageAvailable := sample.CoverageMarkersHit()
+		branches := "n/a"
+		if coverageAvailable {
+			branches = strconv.FormatUint(markers, 10)
+		}
 
 		// Calculate time elapsed since the last update
 		secondsSinceLastUpdate := time.Since(lastPrintedTime).Seconds()
@@ -1343,7 +1361,7 @@ func (f *Fuzzer) printMetricsLoop(ctx context.Context, runCorpus *corpus.Corpus)
 		logBuffer.Append("elapsed: ", colors.Bold, fmt.Sprintf("%8s", formatDuration(time.Since(startTime))), colors.Reset)
 		logBuffer.Append(", calls: ", colors.Bold, fmt.Sprintf("%10d (%6d/sec)", callsTested, callsPerSec), colors.Reset)
 		logBuffer.Append(", seq/s: ", colors.Bold, fmt.Sprintf("%6d", seqPerSec), colors.Reset)
-		logBuffer.Append(", branches: ", colors.Bold, fmt.Sprintf("%6d", runCorpus.CoverageMaps().BranchesHit()), colors.Reset)
+		logBuffer.Append(", branches: ", colors.Bold, fmt.Sprintf("%6s", branches), colors.Reset)
 		logBuffer.Append(", corpus: ", colors.Bold, fmt.Sprintf("%5d", runCorpus.ActiveMutableSequenceCount()), colors.Reset)
 		logBuffer.Append(", failures: ", colors.Bold, fmt.Sprintf("%d/%d", failedSequences, sequencesTested), colors.Reset)
 		logBuffer.Append(", gas/s: ", colors.Bold, fmt.Sprintf("%12d", gasPerSec), colors.Reset)
