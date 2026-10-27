@@ -26,6 +26,8 @@ type PropertyTestCase struct {
 	callSequence *calls.CallSequence
 	// propertyTestTrace describes the execution trace when running the callSequence
 	propertyTestTrace *executiontracer.ExecutionTrace
+	// pendingInitialFailure reserves a fully evaluated candidate until its persistence completes.
+	pendingInitialFailure chan struct{}
 }
 
 // Status describes the TestCaseStatus used to define the current state of the test.
@@ -59,7 +61,11 @@ func (t *PropertyTestCase) LogMessage() *logging.LogBuffer {
 	buffer := logging.NewLogBuffer()
 	if status == TestCaseStatusFailed {
 		buffer.Append(colors.RedBold, fmt.Sprintf("[%s] ", status), colors.Bold, t.Name(), colors.Reset, "\n")
-		buffer.Append(fmt.Sprintf("Test for method \"%s.%s\" failed after the following call sequence:\n", t.targetContract.Name(), t.targetMethod.Sig))
+		if sequence != nil && len(*sequence) == 0 {
+			buffer.Append("Property failed in the initial state after setup, before fuzz calls.\n")
+		} else {
+			buffer.Append(fmt.Sprintf("Test for method \"%s.%s\" failed after the following call sequence:\n", t.targetContract.Name(), t.targetMethod.Sig))
+		}
 		buffer.Append(colors.Bold, "[Call Sequence]", colors.Reset, "\n")
 		buffer.Append(sequence.Log().Elements()...)
 
@@ -104,11 +110,39 @@ func (t *PropertyTestCase) markPassed() {
 func (t *PropertyTestCase) tryFinalizeFailure(sequence *calls.CallSequence, trace *executiontracer.ExecutionTrace) bool {
 	t.resultLock.Lock()
 	defer t.resultLock.Unlock()
-	if t.status == TestCaseStatusFailed {
+	if t.status == TestCaseStatusFailed || t.pendingInitialFailure != nil {
 		return false
 	}
 	t.callSequence = sequence
 	t.propertyTestTrace = trace
 	t.status = TestCaseStatusFailed
 	return true
+}
+
+func (t *PropertyTestCase) beginInitialFailure() (chan struct{}, bool) {
+	t.resultLock.Lock()
+	defer t.resultLock.Unlock()
+	if t.status == TestCaseStatusFailed {
+		return nil, false
+	}
+	if t.pendingInitialFailure != nil {
+		return t.pendingInitialFailure, false
+	}
+	t.pendingInitialFailure = make(chan struct{})
+	return t.pendingInitialFailure, true
+}
+
+func (t *PropertyTestCase) completeInitialFailure(reservation chan struct{}, sequence *calls.CallSequence, trace *executiontracer.ExecutionTrace, err error) bool {
+	t.resultLock.Lock()
+	defer t.resultLock.Unlock()
+	if t.pendingInitialFailure != reservation {
+		return false
+	}
+	accepted := err == nil && t.status != TestCaseStatusFailed
+	if accepted {
+		t.callSequence, t.propertyTestTrace, t.status = sequence, trace, TestCaseStatusFailed
+	}
+	t.pendingInitialFailure = nil
+	close(reservation)
+	return accepted
 }

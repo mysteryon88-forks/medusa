@@ -80,7 +80,8 @@ func GetDefaultProjectConfig(platform string) (*ProjectConfig, error) {
 					},
 				},
 				PropertyTesting: PropertyTestingConfig{
-					Enabled: true,
+					Enabled:           true,
+					CheckInitialState: false,
 					TestPrefixes: []string{
 						"property_",
 					},

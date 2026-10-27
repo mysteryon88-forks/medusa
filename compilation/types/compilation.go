@@ -8,6 +8,9 @@ import (
 
 // Compilation represents the artifacts of a smart contract compilation.
 type Compilation struct {
+	// CompilerVersion is the compiler version reported by the backend, or empty when unavailable.
+	CompilerVersion string
+
 	// SourcePathToArtifact maps source file paths to their corresponding SourceArtifact.
 	SourcePathToArtifact map[string]SourceArtifact
 

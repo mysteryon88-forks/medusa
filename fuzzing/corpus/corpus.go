@@ -41,6 +41,11 @@ type Corpus struct {
 	// to be saved by a test case provider. These are not used in mutations.
 	testResultSequenceFiles *corpusDirectory[calls.CallSequence]
 
+	// initialResults are addressed property failures, separate from executable call sequences.
+	initialResults *corpusDirectory[InitialPropertyResult]
+	// initialWrites coordinates same-digest publication under initialResults.filesLock.
+	initialWrites map[string]*initialResultWrite
+
 	// unexecutedCallSequences defines the callSequences which have not yet been executed by the fuzzer. As each item
 	// is selected for execution by the fuzzer on startup, it is removed. This way, all call sequences loaded from disk
 	// are executed to check for test failures.
@@ -70,12 +75,18 @@ func NewCorpus(corpusDirectory string) (*Corpus, error) {
 		coverageMaps:            coverage.NewCoverageMaps(),
 		callSequenceFiles:       newCorpusDirectory[calls.CallSequence](""),
 		testResultSequenceFiles: newCorpusDirectory[calls.CallSequence](""),
+		initialResults:          newCorpusDirectory[InitialPropertyResult](""),
+		initialWrites:           make(map[string]*initialResultWrite),
 		unexecutedCallSequences: make([]calls.CallSequence, 0),
 		logger:                  logging.GlobalLogger.NewSubLogger("module", "corpus"),
 	}
 
 	// If we have a corpus directory set, parse our call sequences.
 	if corpus.storageDirectory != "" {
+		corpus.initialResults.path = filepath.Join(corpus.storageDirectory, "initial_results")
+		if err := corpus.readInitialResults(); err != nil {
+			return nil, err
+		}
 		// Migrate the legacy corpus structure
 		// Note that it is important to call this first since we want to move all the call sequence files before reading
 		// them into the corpus

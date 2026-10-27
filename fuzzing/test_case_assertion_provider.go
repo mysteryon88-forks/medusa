@@ -111,6 +111,9 @@ func (t *AssertionTestCaseProvider) onFuzzerStarting(event FuzzerStartingEvent) 
 // have been destroyed. It clears state tracked for each FuzzerWorker and sets test cases in "running" states to
 // "passed".
 func (t *AssertionTestCaseProvider) onFuzzerStopping(event FuzzerStoppingEvent) error {
+	if event.err != nil {
+		return nil
+	}
 	// Loop through each test case and set any tests with a running status to a passed status.
 	for _, testCase := range t.testCases {
 		testCase.markPassed()

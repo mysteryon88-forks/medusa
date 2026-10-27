@@ -14,6 +14,10 @@ project state.
 target contracts, and then replays each saved sequence against a test chain. Any sequence that fails validation is
 removed from disk.
 
+Version 1 [initial property manifests](../testing/initial_results.md) in `initial_results/` are validated and preserved.
+The command reports their property verification as deferred: actual property evaluation requires the worker's complete
+setup and occurs during `medusa fuzz` or `Fuzzer.Start`. Cleaning does not establish that those failures still reproduce.
+
 ## Requirements
 
 - [`fuzzing.corpusDirectory`](../project_configuration/fuzzing_config.md#corpusdirectory) must be configured in your project config.

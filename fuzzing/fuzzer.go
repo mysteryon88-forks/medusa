@@ -82,11 +82,14 @@ type Fuzzer struct {
 	// metrics represents the metrics for the fuzzing campaign.
 	metrics *FuzzerMetrics
 	// metricsLock publishes counters and coverage from the same run to polling clients.
-	metricsLock     sync.Mutex
-	metricsCoverage *coverage.CoverageMaps
-	metricsFinal    *FuzzerMetricsSnapshot
+	metricsLock          sync.Mutex
+	metricsCoverage      *coverage.CoverageMaps
+	metricsFinal         *FuzzerMetricsSnapshot
+	propertyTestProvider *PropertyTestCaseProvider
 	// corpus stores a list of transaction sequences that can be used for coverage-guided fuzzing
 	corpus *corpus.Corpus
+	// initialResults is the immutable list loaded at campaign start, excluding new worker results.
+	initialResults []corpus.InitialPropertyResult
 
 	// revertReporter tracks per-function reversion metrics, if enabled
 	revertReporter *reverts.RevertReporter
@@ -283,7 +286,7 @@ func NewFuzzerWithContext(ctx context.Context, config config.ProjectConfig) (*Fu
 
 	// Register any default providers if specified.
 	if fuzzer.config.Fuzzing.Testing.PropertyTesting.Enabled {
-		attachPropertyTestCaseProvider(fuzzer)
+		fuzzer.propertyTestProvider = attachPropertyTestCaseProvider(fuzzer)
 	}
 	if fuzzer.config.Fuzzing.Testing.AssertionTesting.Enabled {
 		attachAssertionTestCaseProvider(fuzzer)
@@ -425,49 +428,43 @@ func (f *Fuzzer) isLibrary(name string) bool {
 	return false
 }
 
-// TestCases exposes the underlying tests run during the fuzzing campaign.
+// TestCases returns a copy of the campaign's test list. The test case objects remain shared.
 func (f *Fuzzer) TestCases() []TestCase {
-	return f.testCases
+	f.testCasesLock.Lock()
+	defer f.testCasesLock.Unlock()
+	return slices.Clone(f.testCases)
 }
 
 // TestCasesWithStatus exposes the underlying tests with the provided status.
 func (f *Fuzzer) TestCasesWithStatus(status TestCaseStatus) []TestCase {
-	// Acquire a thread lock to avoid race conditions
-	f.testCasesLock.Lock()
-	defer f.testCasesLock.Unlock()
-
 	// Collect all test cases with matching statuses.
-	return utils.SliceWhere(f.testCases, func(t TestCase) bool {
+	return utils.SliceWhere(f.TestCases(), func(t TestCase) bool {
 		return t.Status() == status
 	})
 }
 
 // RegisterTestCase registers a new TestCase with the Fuzzer.
 func (f *Fuzzer) RegisterTestCase(testCase TestCase) {
-	// Acquire a thread lock to avoid race conditions
 	f.testCasesLock.Lock()
-	defer f.testCasesLock.Unlock()
-
-	// Display what is being tested
-	f.logger.Info(testCase.LogMessage().Elements()...)
-
-	// Append our test case to our list
 	f.testCases = append(f.testCases, testCase)
+	f.testCasesLock.Unlock()
+	f.logger.Info(testCase.LogMessage().Elements()...)
 }
 
 // ReportTestCaseFinished is used to report a TestCase status as finalized to the Fuzzer.
 func (f *Fuzzer) ReportTestCaseFinished(testCase TestCase) {
-	// Acquire a thread lock to avoid race conditions
+	id := testCase.ID()
 	f.testCasesLock.Lock()
-	defer f.testCasesLock.Unlock()
 
 	// If we already reported this test case as finished, stop
-	if _, alreadyExists := f.testCasesFinished[testCase.ID()]; alreadyExists {
+	if _, alreadyExists := f.testCasesFinished[id]; alreadyExists {
+		f.testCasesLock.Unlock()
 		return
 	}
 
 	// Otherwise now mark the test case as finished.
-	f.testCasesFinished[testCase.ID()] = testCase
+	f.testCasesFinished[id] = testCase
+	f.testCasesLock.Unlock()
 
 	// We only log here if we're not configured to stop on the first test failure. This is because the fuzzer prints
 	// results on exit, so we avoid duplicate messages.
@@ -1123,6 +1120,11 @@ func (f *Fuzzer) Start() error {
 	if err != nil {
 		f.logger.Error("Failed to create the corpus", err)
 		return err
+	}
+	f.initialResults = f.corpus.InitialPropertyResults()
+	if len(f.initialResults) > 0 && (!f.config.Fuzzing.Testing.PropertyTesting.Enabled || f.propertyTestProvider == nil) {
+		first := f.initialResults[0]
+		return fmt.Errorf("initial replay unsupported: %s test %s: property testing is disabled", first.FileName, first.TestID)
 	}
 	err = f.corpus.Initialize(baseTestChain, f.contractDefinitions)
 	if err != nil {

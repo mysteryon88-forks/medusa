@@ -665,6 +665,7 @@ func (fw *FuzzerWorker) run(baseTestChain *chain.TestChain) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	defer fw.chain.Close()
 
 	// Register genesis-loaded contracts with their ABIs.
 	// These contracts are already deployed (loaded from genesis state) so they don't trigger
@@ -673,17 +674,19 @@ func (fw *FuzzerWorker) run(baseTestChain *chain.TestChain) (bool, error) {
 		if err := fw.fuzzer.applyGenesisContractMappings(fw.deployedContracts); err != nil {
 			return false, err
 		}
+		fw.updateMethods()
 		// Add only the genesis-mapped addresses to the value set so the fuzzer generates calls to them.
 		for addrStr := range fw.fuzzer.config.Fuzzing.TestChainConfig.GenesisContractMappings {
 			if addr, err := utils.HexStringToAddress(addrStr); err == nil {
 				fw.valueSet.AddAddress(addr)
+				if err := fw.Events.ContractAdded.Publish(FuzzerWorkerContractAddedEvent{
+					Worker: fw, ContractAddress: addr, ContractDefinition: fw.deployedContracts[addr],
+				}); err != nil {
+					return false, fmt.Errorf("mapped genesis contract subscriber: %w", err)
+				}
 			}
 		}
-		fw.updateMethods()
 	}
-
-	// Defer the closing of the test chain object
-	defer fw.chain.Close()
 
 	// Emit an event indicating the worker has set up its chain.
 	err = fw.Events.FuzzerWorkerChainSetup.Publish(FuzzerWorkerChainSetupEvent{
@@ -700,6 +703,21 @@ func (fw *FuzzerWorker) run(baseTestChain *chain.TestChain) (bool, error) {
 	// Save the current block index as all contracts have been deployed at this point, and we'll want to revert
 	// to this state between testing.
 	fw.testingBaseBlockIndex = uint64(len(fw.chain.CommittedBlocks()))
+	if provider := fw.fuzzer.propertyTestProvider; provider != nil && fw.fuzzer.config.Fuzzing.Testing.PropertyTesting.Enabled && (fw.fuzzer.config.Fuzzing.Testing.PropertyTesting.CheckInitialState || len(fw.fuzzer.initialResults) > 0) {
+		if err := provider.replayInitialResults(fw); err != nil {
+			return false, err
+		}
+		if fw.fuzzer.config.Fuzzing.Testing.PropertyTesting.CheckInitialState {
+			if err := provider.checkInitialState(fw); err != nil {
+				return false, err
+			}
+		}
+		if len(fw.stateChangingMethods)+len(fw.pureMethods)+len(fw.fallbackMethods) == 0 {
+			fw.fuzzer.logger.Info("Initial property checks completed; no callable methods, stopping")
+			fw.fuzzer.Stop()
+			return true, nil
+		}
+	}
 
 	// Enter the main fuzzing loop. In the main fuzzing loop, we will always handle shrink requests first.
 	// While there are no shrink requests, we will execute call sequence restricted by our memory database size based

@@ -115,6 +115,7 @@ func (s *SolcCompilationConfig) CompileContext(ctx context.Context) ([]types.Com
 
 	// Create a compilation unit out of this.
 	compilation := types.NewCompilation()
+	compilation.CompilerVersion = v.String()
 
 	// Create a map of contract names to their kinds
 	contractKinds := make(map[string]types.ContractKind)

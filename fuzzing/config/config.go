@@ -311,6 +311,8 @@ type PanicCodeConfig struct {
 type PropertyTestingConfig struct {
 	// Enabled describes whether testing is enabled.
 	Enabled bool `json:"enabled"`
+	// CheckInitialState evaluates properties after complete worker setup, before fuzz calls.
+	CheckInitialState bool `json:"checkInitialState"`
 
 	// TestPrefixes dictates what method name prefixes will determine if a contract method is a property test.
 	TestPrefixes []string `json:"testPrefixes"`

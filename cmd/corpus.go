@@ -158,6 +158,9 @@ func cmdRunCorpusClean(cmd *cobra.Command, args []string) error {
 		if invalidCount > 0 {
 			cmdLogger.Info(colors.Bold, invalidCount, colors.Reset, " invalid sequences removed from disk")
 		}
+		if result.DeferredInitialResults > 0 {
+			cmdLogger.Info(result.DeferredInitialResults, " initial result manifest(s) preserved; property verification deferred to worker setup")
+		}
 
 		return nil
 	})
