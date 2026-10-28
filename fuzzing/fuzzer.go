@@ -1079,6 +1079,7 @@ func (f *Fuzzer) Start() error {
 	var monitoring sync.WaitGroup
 	stopServices := func() {
 		stopMonitoring()
+		f.ctxCancelFunc()
 		stopReporter()
 		monitoring.Wait()
 		f.corpusPruner.Wait()
@@ -1147,7 +1148,7 @@ func (f *Fuzzer) Start() error {
 		f.logger.Info("Initializing corpus...")
 
 		// Monitor corpus initialization
-		startMonitor(func() { f.monitorCorpusInitialization(monitorCtx, f.corpus) })
+		startMonitor(func() { f.monitorCorpusInitialization() })
 	}
 
 	// Start the corpus pruner.
@@ -1297,30 +1298,26 @@ func (f *Fuzzer) Terminate() {
 
 // monitorCorpusInitialization monitors the corpus initialization process and logs the corpus health when it is complete.
 // This goroutine is short-lived and exits when the corpus is initialized.
-func (f *Fuzzer) monitorCorpusInitialization(ctx context.Context, runCorpus *corpus.Corpus) {
+func (f *Fuzzer) monitorCorpusInitialization() {
 	// There is nothing to do if there are no corpus elements or unexecuted call sequences
-	totalSequences, totalTestResults := runCorpus.CallSequenceEntryCount()
-	if !runCorpus.InitializingCorpus() || totalSequences == 0 || totalTestResults == 0 {
+	totalSequences, totalTestResults := f.corpus.CallSequenceEntryCount()
+	if !f.corpus.InitializingCorpus() || totalSequences == 0 || totalTestResults == 0 {
 		return
 	}
 
 	// Capture an approximate start time
 	startTime := time.Now()
-	for !utils.CheckContextDone(ctx) && !utils.CheckContextDone(f.emergencyCtx) {
+	for !utils.CheckContextDone(f.ctx) && !utils.CheckContextDone(f.emergencyCtx) {
 		// Go to sleep if corpus is still initializing
-		if runCorpus.InitializingCorpus() {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(200 * time.Millisecond):
-			}
+		if f.corpus.InitializingCorpus() {
+			time.Sleep(200 * time.Millisecond)
 			continue
 		}
 
 		// Calculate the necessary variables for corpus health
-		totalSequences, totalTestResults := runCorpus.CallSequenceEntryCount()
+		totalSequences, totalTestResults := f.corpus.CallSequenceEntryCount()
 		totalCorpusEntries := totalSequences + totalTestResults
-		validSequences := runCorpus.ValidCallSequences()
+		validSequences := f.corpus.ValidCallSequences()
 		invalidSequences := int(totalSequences - int(validSequences))
 
 		// Log how much time it took to initialize the corpus
