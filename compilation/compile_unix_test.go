@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -19,8 +18,10 @@ import (
 )
 
 func fakeCompilerEscapedChild(dir string) {
+	lifetime := connectCompilerFixture()
 	c := exec.Command(os.Args[0], "--hold-pipes")
 	c.Env = os.Environ()
+	c.ExtraFiles = []*os.File{lifetime}
 	c.Stdout, c.Stderr = os.Stdout, os.Stderr
 	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := c.Start(); err != nil {
@@ -33,51 +34,45 @@ func fakeCompilerEscapedChild(dir string) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	_ = c.Process.Kill()
-	_ = c.Wait()
 	panic("escaped tool child did not start")
-}
-
-func cleanupCompilerChild(t *testing.T, dir string) {
-	t.Helper()
-	t.Cleanup(func() {
-		if b, err := os.ReadFile(filepath.Join(dir, "escaped")); err == nil {
-			pid, err := strconv.Atoi(string(b))
-			if err != nil {
-				t.Error(err)
-				return
-			}
-			p, err := os.FindProcess(pid)
-			if err == nil {
-				_ = p.Kill()
-				_ = p.Release()
-			}
-		}
-	})
 }
 
 func TestCompileContextControlFailure(t *testing.T) {
 	for _, stage := range []string{"solc-version", "slither"} {
 		t.Run(stage, func(t *testing.T) {
 			dir := fakeCompilerPath(t, "")
-			cleanupCompilerChild(t, dir)
+			fixture := newCompilerFixtureOwner(t)
 			t.Setenv("MEDUSA_CONTROL_FAIL", stage)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			var err error
-			if stage == "solc-version" {
+			fixture.beforeJoin = cancel
+			run := func() error {
 				c := platforms.NewCryticCompilationConfig("unused.sol")
 				c.ExportDirectory = filepath.Join(dir, "export")
 				c.SolcVersion = "0.8.25"
-				_, _, err = c.CompileContext(ctx)
+				_, _, err := c.CompileContext(ctx)
+				return err
+			}
+			if stage == "slither" {
+				config := contextFuzzerConfig(t)
+				run = func() error { _, err := fuzzing.NewFuzzerWithContext(ctx, *config); return err }
+			}
+			fixture.registerCleanup(t)
+			fixture.start(run)
+			select {
+			case <-fixture.done:
+			case <-time.After(8 * time.Second):
+				t.Fatal("compiler operation did not return")
+			}
+			if stage == "solc-version" {
 				calls, readErr := os.ReadFile(filepath.Join(dir, "calls"))
 				require.NoError(t, readErr)
 				require.NotContains(t, string(calls), "solc-select")
 				require.NotContains(t, string(calls), "crytic-compile")
-			} else {
-				_, err = fuzzing.NewFuzzerWithContext(ctx, *contextFuzzerConfig(t))
 			}
-			require.ErrorIs(t, err, utils.ErrCommandControl)
+			require.ErrorIs(t, fixture.runErr, utils.ErrCommandControl)
+			fixture.waitRegistered(t)
+			require.ErrorIs(t, fixture.waitDescendantEOF(25*time.Millisecond), errCompilerFixturePending, "escaped compiler must still hold its lifetime socket before fallback shutdown")
 		})
 	}
 }

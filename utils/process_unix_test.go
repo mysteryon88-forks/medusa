@@ -10,21 +10,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
-
-func fixtureProcessGone(pid int) bool {
-	if b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat"); err == nil {
-		// An orphan may await init's reaper after it has stopped executing.
-		return strings.HasPrefix(string(b)[strings.LastIndex(string(b), ")")+1:], " Z")
-	}
-	return syscall.Kill(pid, 0) == syscall.ESRCH
-}
 
 func escapeProcessFixture(directory string) {
 	if _, err := syscall.Setsid(); err != nil {
@@ -45,7 +36,7 @@ func forkProcessFixture(directory string) {
 	}
 	<-interrupts
 	child := processFixture("grandchild", directory)
-	if err := child.Start(); err != nil {
+	if err := startProcessFixtureChild(child); err != nil {
 		panic(err)
 	}
 	for {
@@ -59,22 +50,36 @@ func forkProcessFixture(directory string) {
 func observedProcessFixture(t *testing.T, role string) (*exec.Cmd, <-chan commandExit, string) {
 	t.Helper()
 	dir := t.TempDir()
-	c := processFixture(role, dir)
-	cleanup, err := startCommandTree(c)
-	require.NoError(t, err)
-	observed, finished := make(chan commandExit, 1), make(chan struct{})
-	go func() { defer close(finished); observed <- observeCommandExit(c) }()
-	t.Cleanup(func() {
-		_ = cleanup()
-		_ = c.Wait()
-		select {
-		case <-finished:
-		case <-time.After(5 * time.Second):
-			t.Error("process observer leaked")
+	f := newProcessFixtureLifetime(t, role, dir)
+	observed, reap := make(chan commandExit, 1), make(chan struct{})
+	started := make(chan struct{})
+	var startErr error
+	f.beforeJoin = func() { close(reap) }
+	f.start(func(c *exec.Cmd) error {
+		cleanup, err := startCommandTree(c)
+		startErr = err
+		close(started)
+		if err != nil {
+			return err
 		}
+		observerDone := make(chan struct{})
+		go func() { observed <- observeCommandExit(c); close(observerDone) }()
+		<-reap
+		// The sole Wait stays after every group signal, including failure cleanup.
+		cleanupErr := cleanup()
+		waitErr := c.Wait()
+		<-observerDone
+		return errors.Join(cleanupErr, waitErr)
 	})
+	select {
+	case <-started:
+		require.NoError(t, startErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("observed fixture did not start")
+	}
+	f.waitAck(t)
 	waitProcessFile(t, filepath.Join(dir, "ready"))
-	return c, observed, dir
+	return f.command, observed, dir
 }
 
 func TestProcessContextInspectionError(t *testing.T) {
@@ -118,28 +123,23 @@ func TestProcessContextEscapedPipe(t *testing.T) {
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	result, finished := make(chan error, 1), make(chan struct{})
-	go func() {
-		defer close(finished)
-		_, _, _, err := RunCommandWithContext(ctx, processFixture("escaped-root", dir))
+	f := newProcessFixtureLifetime(t, "escaped-root", dir)
+	f.beforeJoin = cancel
+	result := make(chan error, 1)
+	f.start(func(c *exec.Cmd) error {
+		_, _, _, err := RunCommandWithContext(ctx, c)
 		result <- err
-	}()
+		return err
+	})
+	f.waitAck(t)
 	pid, err := strconv.Atoi(string(waitProcessFile(t, filepath.Join(dir, "grandchild"))))
 	require.NoError(t, err)
-	p, err := os.FindProcess(pid)
-	require.NoError(t, err)
-	defer func() { _ = p.Kill(); _ = p.Release() }()
-	t.Cleanup(func() {
-		select {
-		case <-finished:
-		case <-time.After(5 * time.Second):
-			t.Error("escaped pipe reader leaked")
-		}
-	})
 	select {
 	case err := <-result:
 		require.ErrorContains(t, err, "output drain exceeded")
 		require.False(t, fixtureProcessGone(pid), "runner signaled a process outside its group")
+		require.NoError(t, f.waitReleased(time.Second))
+		require.ErrorIs(t, f.waitDescendantEOF(25*time.Millisecond), errFixturePending, "escaped fixture must retain its lifetime endpoint")
 	case <-time.After(5 * time.Second):
 		t.Fatal("escaped pipe held runner open")
 	}
@@ -148,31 +148,23 @@ func TestProcessContextEscapedPipe(t *testing.T) {
 func TestProcessContextForeground(t *testing.T) {
 	dir := t.TempDir()
 	result := make(chan error, 1)
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		_, _, _, err := RunCommandWithContext(context.Background(), processFixture("single", dir))
+	f := newProcessFixtureLifetime(t, "single", dir)
+	f.start(func(c *exec.Cmd) error {
+		_, _, _, err := RunCommandWithContext(context.Background(), c)
 		result <- err
-	}()
-	t.Cleanup(func() {
-		select {
-		case <-finished:
-		case <-time.After(5 * time.Second):
-			t.Error("foreground process leaked")
-		}
+		return err
 	})
+	f.waitAck(t)
 	pid, err := strconv.Atoi(string(waitProcessFile(t, filepath.Join(dir, "root"))))
 	require.NoError(t, err)
-	p, err := os.FindProcess(pid)
-	require.NoError(t, err)
-	defer func() { _ = p.Kill(); _ = p.Release() }()
 	group, err := syscall.Getpgid(pid)
 	require.NoError(t, err)
 	require.Equal(t, syscall.Getpgrp(), group)
-	require.NoError(t, p.Signal(os.Interrupt))
+	_, err = f.control.Write([]byte{'I'})
+	require.NoError(t, err)
 	select {
 	case err := <-result:
-		require.Error(t, err)
+		require.True(t, fixtureSIGINT(err), "foreground exit must be SIGINT: %v", err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("foreground interrupt was lost")
 	}

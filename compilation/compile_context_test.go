@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,11 +29,8 @@ func TestMain(m *testing.M) {
 
 func fakeCompilerTool() {
 	if len(os.Args) > 1 && os.Args[1] == "--hold-pipes" {
-		if err := os.WriteFile(filepath.Join(os.Getenv("MEDUSA_TOOL_LOG"), "escaped"), []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
-			panic(err)
-		}
-		time.Sleep(20 * time.Second)
-		os.Exit(99)
+		fakeCompilerHoldPipes(os.Getenv("MEDUSA_TOOL_LOG"))
+		return
 	}
 	tool := strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe")
 	stage := tool
@@ -134,7 +130,20 @@ func TestCompileContextStages(t *testing.T) {
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			var constructorConfig *config.ProjectConfig
+			if stage == "constructor-slither" {
+				constructorConfig = contextFuzzerConfig(t)
+			}
 			result, finished := make(chan error, 1), make(chan struct{})
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case <-finished:
+				case <-time.After(6 * time.Second):
+					t.Error("preparation did not stop; retaining test resources until join")
+					<-finished
+				}
+			})
 			go func() {
 				defer close(finished)
 				var err error
@@ -143,8 +152,7 @@ func TestCompileContextStages(t *testing.T) {
 					s := types.SlitherConfig{UseSlither: true}
 					_, err = s.RunSlitherContext(ctx, "unused.sol", "")
 				case "constructor-slither":
-					c := contextFuzzerConfig(t)
-					_, err = fuzzing.NewFuzzerWithContext(ctx, *c)
+					_, err = fuzzing.NewFuzzerWithContext(ctx, *constructorConfig)
 				case "crytic-compile", "solc-select":
 					c := platforms.NewCryticCompilationConfig("unused.sol")
 					c.ExportDirectory = filepath.Join(dir, "export")
@@ -157,14 +165,6 @@ func TestCompileContextStages(t *testing.T) {
 				}
 				result <- err
 			}()
-			t.Cleanup(func() {
-				cancel()
-				select {
-				case <-finished:
-				case <-time.After(6 * time.Second):
-					t.Error("preparation did not stop")
-				}
-			})
 			deadline := time.Now().Add(5 * time.Second)
 			for {
 				if _, err := os.Stat(filepath.Join(dir, "ready")); err == nil {

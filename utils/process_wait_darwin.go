@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"os"
 	"syscall"
 	"unsafe"
 
@@ -8,6 +9,29 @@ import (
 )
 
 func validateCommandPlatform() error { return nil }
+
+func ownedZombieGroup(processes []unix.KinfoProc, group, parent int) bool {
+	if len(processes) != 1 {
+		return false
+	}
+	p := processes[0]
+	return int(p.Proc.P_pid) == group && int(p.Eproc.Pgid) == group &&
+		int(p.Eproc.Ppid) == parent && p.Proc.P_stat == 5 // SZOMB
+}
+
+func commandGroupCertificateWith(group, parent int, inspect func(int) ([]unix.KinfoProc, error)) (bool, error) {
+	processes, err := inspect(group)
+	if err != nil {
+		return false, err
+	}
+	return ownedZombieGroup(processes, group, parent), nil
+}
+
+func commandGroupCertificate(group int) (bool, error) {
+	return commandGroupCertificateWith(group, os.Getpid(), func(group int) ([]unix.KinfoProc, error) {
+		return unix.SysctlKinfoProcSlice("kern.proc.pgrp", group)
+	})
+}
 
 func waitCommandExit(pid int) error {
 	// waitid only writes siginfo_t; no fields are interpreted here. This aligned

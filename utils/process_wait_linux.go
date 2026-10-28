@@ -11,6 +11,8 @@ import (
 
 func validateCommandPlatform() error { return nil }
 
+func commandGroupCertificate(int) (bool, error) { return false, nil }
+
 func waitCommandExit(pid int) error {
 	var info unix.Siginfo
 	for {

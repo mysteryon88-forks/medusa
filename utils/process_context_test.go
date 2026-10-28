@@ -43,7 +43,13 @@ func TestProcessContextHelper(t *testing.T) {
 		return
 	}
 	role, directory := os.Args[len(os.Args)-2], os.Args[len(os.Args)-1]
-	time.AfterFunc(20*time.Second, func() { os.Exit(99) })
+	if role == "fixture-delayed-child" {
+		bootstrapDelayedProcessFixture(directory)
+	}
+	initializeProcessFixture()
+	if fixtureLifetimeRole(role, directory) {
+		return
+	}
 	if role == "escape" {
 		escapeProcessFixture(directory)
 		return
@@ -89,7 +95,7 @@ func TestProcessContextHelper(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(directory, "closePipes")); err != nil {
 			c.Stdout, c.Stderr = os.Stdout, os.Stderr
 		}
-		require.NoError(t, c.Start())
+		require.NoError(t, startProcessFixtureChild(c))
 		waitProcessFile(t, filepath.Join(directory, "grandchild"))
 	}
 	if name == "root" {
@@ -125,11 +131,6 @@ func TestProcessContextWaitFailure(t *testing.T) {
 	called := make(chan struct{})
 	c.Cancel = func() error { close(called); return want }
 	result, finished := make(chan error, 1), make(chan struct{})
-	go func() {
-		defer close(finished)
-		_, _, _, err := RunCommandWithContext(outer, c)
-		result <- err
-	}()
 	t.Cleanup(func() {
 		cancelOuter()
 		cancelInner()
@@ -137,8 +138,14 @@ func TestProcessContextWaitFailure(t *testing.T) {
 		case <-finished:
 		case <-time.After(5 * time.Second):
 			t.Error("command with failing Cancel leaked")
+			<-finished
 		}
 	})
+	go func() {
+		defer close(finished)
+		_, _, _, err := RunCommandWithContext(outer, c)
+		result <- err
+	}()
 	waitProcessFile(t, filepath.Join(dir, "ready"))
 	cancelInner()
 	select {
@@ -169,8 +176,22 @@ func TestProcessContextStdin(t *testing.T) {
 	defer unblock()
 	c := processFixture("single", t.TempDir())
 	c.Stdin = blockingCommandInput{release: release}
-	result := make(chan error, 1)
-	go func() { _, _, _, err := RunCommandWithContext(ctx, c); result <- err }()
+	result, finished := make(chan error, 1), make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		unblock()
+		select {
+		case <-finished:
+		case <-time.After(5 * time.Second):
+			t.Error("stdin command leaked")
+			<-finished
+		}
+	})
+	go func() {
+		defer close(finished)
+		_, _, _, err := RunCommandWithContext(ctx, c)
+		result <- err
+	}()
 	select {
 	case err := <-result:
 		require.ErrorContains(t, err, "stdin")
@@ -189,45 +210,25 @@ func TestProcessContextStdin(t *testing.T) {
 }
 
 func TestProcessContextIsolation(t *testing.T) {
-	start := func() (context.CancelFunc, <-chan error, int) {
+	start := func() (*processFixtureLifetime, context.CancelFunc, <-chan error, int) {
 		ctx, cancel := context.WithCancel(context.Background())
 		dir := t.TempDir()
-		result, finished := make(chan error, 1), make(chan struct{})
-		go func() {
-			defer close(finished)
-			_, _, _, err := RunCommandWithContext(ctx, processFixture("tree", dir))
+		f := newProcessFixtureLifetime(t, "tree", dir)
+		f.beforeJoin = cancel
+		result := make(chan error, 1)
+		f.start(func(c *exec.Cmd) error {
+			_, _, _, err := RunCommandWithContext(ctx, c)
 			result <- err
-		}()
-		t.Cleanup(func() {
-			cancel()
-			select {
-			case <-finished:
-			case <-time.After(5 * time.Second):
-				t.Error("isolated command leaked")
-			}
+			return err
 		})
+		f.waitAck(t)
 		waitProcessFile(t, filepath.Join(dir, "ready"))
-		var owned []*os.Process
-		for _, name := range []string{"root", "child", "grandchild"} {
-			pid, err := strconv.Atoi(string(waitProcessFile(t, filepath.Join(dir, name))))
-			require.NoError(t, err)
-			p, err := os.FindProcess(pid)
-			if err == nil {
-				owned = append(owned, p)
-			}
-		}
-		t.Cleanup(func() {
-			for _, p := range owned {
-				_ = p.Kill()
-				_ = p.Release()
-			}
-		})
 		pid, err := strconv.Atoi(string(waitProcessFile(t, filepath.Join(dir, "child"))))
 		require.NoError(t, err)
-		return cancel, result, pid
+		return f, cancel, result, pid
 	}
-	cancelA, resultA, _ := start()
-	cancelB, resultB, pidB := start()
+	fA, cancelA, resultA, _ := start()
+	fB, cancelB, resultB, pidB := start()
 	cancelA()
 	select {
 	case err := <-resultA:
@@ -235,6 +236,8 @@ func TestProcessContextIsolation(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("first operation did not stop")
 	}
+	require.NoError(t, fA.waitReleased(time.Second))
+	require.NoError(t, fA.waitEOF(time.Second), "first operation left a fixture alive before fallback")
 	require.False(t, fixtureProcessGone(pidB), "second operation was terminated")
 	cancelB()
 	select {
@@ -243,6 +246,8 @@ func TestProcessContextIsolation(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("second operation did not stop")
 	}
+	require.NoError(t, fB.waitReleased(time.Second))
+	require.NoError(t, fB.waitEOF(time.Second), "second operation left a fixture alive before fallback")
 }
 
 func TestProcessContextCanceled(t *testing.T) {
@@ -297,42 +302,27 @@ func TestProcessContextTree(t *testing.T) {
 				role = "success-tree"
 				require.NoError(t, os.WriteFile(filepath.Join(dir, "closePipes"), []byte("1"), 0600))
 			}
-			finished := make(chan struct{})
 			result := make(chan error, 1)
 			if mode == "deadline" {
 				var deadlineCancel context.CancelFunc
 				ctx, deadlineCancel = context.WithTimeout(ctx, 2*time.Second)
 				defer deadlineCancel()
 			}
-			go func() {
-				defer close(finished)
-				_, _, _, err := RunCommandWithContext(ctx, processFixture(role, dir))
+			f := newProcessFixtureLifetime(t, role, dir)
+			f.beforeJoin = cancel
+			f.start(func(c *exec.Cmd) error {
+				_, _, _, err := RunCommandWithContext(ctx, c)
 				result <- err
-			}()
-			t.Cleanup(func() {
-				cancel()
-				select {
-				case <-finished:
-				case <-time.After(6 * time.Second):
-					t.Error("process runner leaked")
-				}
+				return err
 			})
+			f.waitAck(t)
 			waitProcessFile(t, filepath.Join(dir, "ready"))
-			owned := make([]*os.Process, 0, 3)
+			var owned []int
 			for _, name := range []string{"root", "child", "grandchild"} {
 				pid, err := strconv.Atoi(string(waitProcessFile(t, filepath.Join(dir, name))))
 				require.NoError(t, err)
-				p, err := os.FindProcess(pid)
-				if err == nil {
-					owned = append(owned, p)
-				}
+				owned = append(owned, pid)
 			}
-			defer func() {
-				for _, p := range owned {
-					_ = p.Kill()
-					_ = p.Release()
-				}
-			}()
 			start := time.Now()
 			switch mode {
 			case "cancel":
@@ -362,9 +352,10 @@ func TestProcessContextTree(t *testing.T) {
 				require.False(t, errors.Is(err, context.Canceled))
 				require.EqualError(t, err, exitError.Error())
 			}
-			for _, p := range owned {
-				require.True(t, fixtureProcessGone(p.Pid), "PID %d survived cleanup", p.Pid)
+			for _, pid := range owned {
+				require.True(t, fixtureProcessGone(pid), "PID %d survived cleanup", pid)
 			}
+			require.NoError(t, f.waitEOF(time.Second), "production cleanup left a fixture endpoint open")
 		})
 	}
 }

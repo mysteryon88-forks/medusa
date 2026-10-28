@@ -33,8 +33,34 @@ func startCommandTree(command *exec.Cmd) (func() error, error) {
 }
 
 func cleanupCommandGroup(group int, inspect func(int) (bool, error)) error {
+	return cleanupCommandGroupWith(group, inspect, syscall.Kill, commandGroupCertificate)
+}
+
+func commandGroupSignal(group int, signal syscall.Signal, kill func(int, syscall.Signal) error, certify func(int) (bool, error)) error {
+	terminal, preErr := certify(group)
+	err := kill(-group, signal)
+	if !errors.Is(err, syscall.EPERM) {
+		return err
+	}
+	if preErr != nil {
+		return errors.Join(err, preErr)
+	}
+	if !terminal {
+		return err
+	}
+	terminal, postErr := certify(group)
+	if postErr != nil {
+		return errors.Join(err, postErr)
+	}
+	if terminal {
+		return nil
+	}
+	return err
+}
+
+func cleanupCommandGroupWith(group int, inspect func(int) (bool, error), kill func(int, syscall.Signal) error, certify func(int) (bool, error)) error {
 	var inspectionErr error
-	err := syscall.Kill(-group, syscall.SIGTERM)
+	err := commandGroupSignal(group, syscall.SIGTERM, kill, certify)
 	if err == syscall.ESRCH {
 		return nil
 	}
@@ -50,7 +76,7 @@ func cleanupCommandGroup(group int, inspect func(int) (bool, error)) error {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if err := syscall.Kill(-group, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+	if err := commandGroupSignal(group, syscall.SIGKILL, kill, certify); err != nil && err != syscall.ESRCH {
 		return errors.Join(signalErr, inspectionErr, fmt.Errorf("kill command group: %w", err))
 	}
 	deadline := time.Now().Add(time.Second)
