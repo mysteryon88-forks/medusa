@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/crytic/medusa-geth/accounts/abi"
 	"github.com/crytic/medusa-geth/common"
@@ -118,7 +119,8 @@ func TestFailureSnapshotErrorDoesNotPublish(t *testing.T) {
 
 func TestFailureWaitsForInitialSave(t *testing.T) {
 	f := newLifecycleFuzzer(t)
-	f.emergencyCtx = context.Background()
+	ctx := &doneObservedContext{Context: context.Background(), doneCalled: make(chan struct{}, 1)}
+	f.emergencyCtx = ctx
 	f.metrics = newFuzzerMetrics(1, nil)
 	f.testCasesFinished = make(map[string]TestCase)
 	c := &PropertyTestCase{targetContract: contracts.NewContract("C", "C.sol", nil, nil)}
@@ -135,9 +137,27 @@ func TestFailureWaitsForInitialSave(t *testing.T) {
 		accepted, err := p.finalizeFailure(&FuzzerWorker{fuzzer: f}, c, &sequence, nil)
 		done <- result{accepted, err}
 	}()
+	select {
+	case <-ctx.doneCalled:
+	case <-time.After(time.Second):
+		t.Fatal("finalization did not start waiting for the initial save")
+	}
 	require.False(t, c.completeInitialFailure(reservation, &sequence, nil, errors.New("save failed")))
 	got := <-done
 	require.NoError(t, got.err)
 	require.True(t, got.accepted)
 	require.EqualValues(t, 1, f.metrics.FailedSequences().Int64())
+}
+
+type doneObservedContext struct {
+	context.Context
+	doneCalled chan struct{}
+}
+
+func (c *doneObservedContext) Done() <-chan struct{} {
+	select {
+	case c.doneCalled <- struct{}{}:
+	default:
+	}
+	return c.Context.Done()
 }
