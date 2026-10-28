@@ -77,7 +77,7 @@ func fixtureSIGINT(err error) bool {
 	if !errors.As(err, &exit) {
 		return false
 	}
-	status, ok := exit.ProcessState.Sys().(syscall.WaitStatus)
+	status, ok := exit.Sys().(syscall.WaitStatus)
 	return ok && status.Signaled() && status.Signal() == syscall.SIGINT
 }
 
