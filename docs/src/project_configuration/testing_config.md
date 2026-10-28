@@ -177,6 +177,16 @@ contract MyContract {
   > **Note**: If you are moving over from Echidna, you can add `echidna_` as a test prefix to quickly port over the property tests from it.
 - **Default**: `[property_]`
 
+### `checkInitialState`
+
+- **Type**: Boolean
+- **Description**: Check properties after deployment and all worker setup subscribers, before corpus replay or fuzz calls.
+  Requires property testing to be enabled. A false return or EVM revert records a failure with an empty call sequence;
+  ABI and infrastructure errors stop the campaign with an error. Saved initial results are replayed even when this option is false.
+- **Default**: `false`
+
+See [Initial property results](../testing/initial_results.md) for storage and replay compatibility.
+
 ## Optimization Testing Configuration
 
 ### `enabled`

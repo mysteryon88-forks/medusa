@@ -64,6 +64,8 @@ type TestChain struct {
 
 	// vmConfigExtensions defines EVM extensions to use with each chain call or transaction.
 	vmConfigExtensions *vm.ConfigExtensions
+	// isolatedCall tracks operations that cannot safely run without a pending block.
+	isolatedCall *isolatedCall
 
 	// genesisDefinition represents the Genesis information used to generate the chain's initial state.
 	genesisDefinition *core.Genesis
@@ -98,6 +100,10 @@ type TestChain struct {
 	// fork mode.
 	stateFactory      state.MedusaStateFactory
 	CompiledContracts map[string]*compilationTypes.CompiledContract
+}
+
+type isolatedCall struct {
+	err error
 }
 
 // NewTestChain creates a simulated Ethereum backend used for testing, or returns an error if one occurred.
@@ -511,15 +517,48 @@ func (t *TestChain) RevertToBlockIndex(index uint64) error {
 // executes a transaction without committing any changes, instead discarding them.
 // It takes an optional state argument, which is the state to execute the message over. If not provided, the
 // current pending state (or committed state if none is pending) will be used instead.
-// The state executed over may be a pending block state.
+// If no block is pending, block-context and label changes are isolated and state changes are reverted. In this mode,
+// revertTo and enabled FFI cheatcodes return an error because their effects cannot be safely contained. Calls with a
+// pending block retain their existing block-context behavior.
 func (t *TestChain) CallContract(msg *core.Message, state types.MedusaStateDB, additionalTracers ...*TestChainTracer) (*core.ExecutionResult, error) {
 	// If our provided state is nil, use our current chain state.
 	if state == nil {
 		state = t.state
 	}
 
+	chainConfig := t.chainConfig
+	vmExtensions := t.vmConfigExtensions
+	var isolated *isolatedCall
+	if t.pendingBlock == nil {
+		var err error
+		chainConfig, err = utils.CopyChainConfig(t.chainConfig)
+		if err != nil {
+			return nil, fmt.Errorf("copy chain config for call: %w", err)
+		}
+		extensions := *t.vmConfigExtensions
+		extensions.ContractAddressOverrides = maps.Clone(extensions.ContractAddressOverrides)
+		vmExtensions = &extensions
+		oldState, oldLabels := t.state, t.Labels
+		oldContext, oldConfig, oldIsolated := t.pendingBlockContext, t.pendingBlockChainConfig, t.isolatedCall
+		t.state, t.Labels = state, maps.Clone(t.Labels)
+		t.pendingBlock = &types.Block{Header: gethTypes.CopyHeader(t.Head().Header), Hash: t.Head().Hash}
+		isolated = &isolatedCall{}
+		t.isolatedCall = isolated
+		defer func() {
+			t.state, t.Labels = oldState, oldLabels
+			t.pendingBlock = nil
+			t.pendingBlockContext, t.pendingBlockChainConfig, t.isolatedCall = oldContext, oldConfig, oldIsolated
+		}()
+	}
+
 	// Obtain our state snapshot to revert any changes after our call
 	snapshot := state.Snapshot()
+	reverted := false
+	defer func() {
+		if !reverted {
+			state.RevertToSnapshot(snapshot)
+		}
+	}()
 
 	// Set infinite balance to the fake caller account
 	state.SetBalance(msg.From, uint256.MustFromBig(math.MaxBig256), tracing.BalanceChangeUnspecified)
@@ -539,10 +578,10 @@ func (t *TestChain) CallContract(msg *core.Message, state types.MedusaStateDB, a
 	extendedTracerRouter.AddTracers(additionalTracers...)
 
 	// Create our EVM instance.
-	evm := vm.NewEVM(blockContext, state, t.chainConfig, vm.Config{
+	evm := vm.NewEVM(blockContext, state, chainConfig, vm.Config{
 		Tracer:           extendedTracerRouter.NativeTracer().Hooks,
 		NoBaseFee:        true,
-		ConfigExtensions: t.vmConfigExtensions,
+		ConfigExtensions: vmExtensions,
 	})
 
 	// Set our block context and chain config in order for cheatcodes to override what EVM interpreter sees.
@@ -565,16 +604,18 @@ func (t *TestChain) CallContract(msg *core.Message, state types.MedusaStateDB, a
 
 	// Revert to our state snapshot to undo any changes.
 	state.RevertToSnapshot(snapshot)
+	reverted = true
 
 	// Gather receipt for OnTxEnd
 	receipt := &gethTypes.Receipt{Type: tx.Type()}
-	if msgResult.Failed() {
-		receipt.Status = gethTypes.ReceiptStatusFailed
-	} else {
-		receipt.Status = gethTypes.ReceiptStatusSuccessful
+	receipt.Status = gethTypes.ReceiptStatusFailed
+	if msgResult != nil {
+		if !msgResult.Failed() {
+			receipt.Status = gethTypes.ReceiptStatusSuccessful
+		}
+		receipt.GasUsed = msgResult.UsedGas
 	}
 	receipt.TxHash = tx.Hash()
-	receipt.GasUsed = msgResult.UsedGas
 
 	// HACK: use OnTxEnd to store the execution trace.
 	// Need to explicitly call OnTxEnd
@@ -582,7 +623,15 @@ func (t *TestChain) CallContract(msg *core.Message, state types.MedusaStateDB, a
 		evm.Config.Tracer.OnTxEnd(receipt, err)
 	}
 
+	if isolated != nil && isolated.err != nil {
+		return nil, isolated.err
+	}
 	return msgResult, err
+}
+
+// ChainID returns an independent copy of the chain ID used to execute messages.
+func (t *TestChain) ChainID() *big.Int {
+	return new(big.Int).Set(t.chainConfig.ChainID)
 }
 
 // PendingBlockContext is the vm.BlockContext for the current pending block.

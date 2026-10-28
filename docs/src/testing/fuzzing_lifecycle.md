@@ -18,7 +18,9 @@ blockchain would look like after the deployment of contracts `A`, `B`, `C` (assu
 
 ![Contract Deployment Diagram](../static/contract_deployment.png)
 
-Now that we have our target contracts deployed, we can start executing call sequences!
+After deployment and all worker setup subscribers, optional [initial property checks](initial_results.md) run before
+the worker replays its corpus or generates fuzz calls. The check repeats when a worker is recreated. Previously saved
+initial results are always checked at this boundary when property testing is enabled.
 
 ## Call sequence execution
 

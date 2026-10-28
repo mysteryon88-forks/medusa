@@ -1,6 +1,7 @@
 package compilation
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -52,6 +53,14 @@ func NewCompilationConfigFromPlatformConfig(platformConfig platforms.PlatformCon
 // is then used to compile the underlying targets. Returns a list of compilations returned by the platform provider or
 // an error if one occurs. Command-line input may also be returned in either case.
 func (c *CompilationConfig) Compile() ([]types.Compilation, string, error) {
+	return c.CompileContext(context.Background())
+}
+
+// CompileContext compiles targets with cancellation, including compiler preflight.
+func (c *CompilationConfig) CompileContext(ctx context.Context) ([]types.Compilation, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
 	// Get the platform config
 	platformConfig, err := c.GetPlatformConfig()
 	if err != nil {
@@ -59,7 +68,13 @@ func (c *CompilationConfig) Compile() ([]types.Compilation, string, error) {
 	}
 
 	// Compile using our solc configs
-	return platformConfig.Compile()
+	if platform, ok := platformConfig.(platforms.ContextPlatformConfig); ok {
+		return platform.CompileContext(ctx)
+	}
+	if ctx.Done() == nil {
+		return platformConfig.Compile()
+	}
+	return nil, "", fmt.Errorf("compilation platform %q does not support cancellation", c.Platform)
 }
 
 // GetPlatformConfig will return the de-serialized version of platforms.PlatformConfig for a given CompilationConfig

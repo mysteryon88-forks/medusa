@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -103,71 +102,66 @@ func cmdRunCorpusClean(cmd *cobra.Command, args []string) error {
 
 	// Create fuzzer (this handles compilation and contract definitions)
 	cmdLogger.Info("Initializing fuzzer...")
-	fuzzer, err := fuzzing.NewFuzzer(*projectConfig)
+	ctx, stopSignals := signal.NotifyContext(cmd.Context(), os.Interrupt)
+	defer stopSignals()
+	fuzzer, err := fuzzing.NewFuzzerWithContext(ctx, *projectConfig)
 	if err != nil {
 		cmdLogger.Error("Failed to initialize fuzzer", err)
 		return err
 	}
 
-	// Create context with cancellation for interrupt handling
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	defer fuzzer.Terminate()
+	return runWithSignalContext(ctx, fuzzer, func() error {
+		// Create test chain and build deployed contracts map
+		cmdLogger.Info("Setting up test chain...")
+		testChain, deployedContracts, err := fuzzer.CreateTestChainForCleaning()
+		if err != nil {
+			cmdLogger.Error("Failed to setup test chain", err)
+			return err
+		}
+		defer testChain.Close()
 
-	// Handle interrupt
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt)
-	go func() {
-		<-sigCh
-		cmdLogger.Info("Interrupted, stopping...")
-		cancel()
-	}()
+		// Create and initialize the corpus
+		cmdLogger.Info("Creating corpus...")
+		fuzzerCorpus, err := corpus.NewCorpus(projectConfig.Fuzzing.CorpusDirectory)
+		if err != nil {
+			cmdLogger.Error("Failed to create the corpus", err)
+			return err
+		}
+		err = fuzzerCorpus.Initialize(testChain, fuzzer.ContractDefinitions())
+		if err != nil {
+			cmdLogger.Error("Failed to initialize the corpus", err)
+			return err
+		}
 
-	// Create test chain and build deployed contracts map
-	cmdLogger.Info("Setting up test chain...")
-	testChain, deployedContracts, err := fuzzer.CreateTestChainForCleaning()
-	if err != nil {
-		cmdLogger.Error("Failed to setup test chain", err)
-		return err
-	}
-	defer testChain.Close()
+		cmdLogger.Info("Loading and validating corpus from: ", colors.Bold, corpusDir, colors.Reset)
 
-	// Create and initialize the corpus
-	cmdLogger.Info("Creating corpus...")
-	fuzzerCorpus, err := corpus.NewCorpus(projectConfig.Fuzzing.CorpusDirectory)
-	if err != nil {
-		cmdLogger.Error("Failed to create the corpus", err)
-		return err
-	}
-	err = fuzzerCorpus.Initialize(testChain, fuzzer.ContractDefinitions())
-	if err != nil {
-		cmdLogger.Error("Failed to initialize the corpus", err)
-		return err
-	}
+		// Create cleaner and run
+		cleaner := corpus.NewCorpusCleaner(fuzzerCorpus, cmdLogger)
+		start := time.Now()
+		result, err := cleaner.Clean(ctx, testChain, deployedContracts)
+		if err != nil {
+			cmdLogger.Error("Error during corpus cleaning", err)
+			return err
+		}
+		cmdLogger.Info("Corpus cleaning completed in ", time.Since(start).Round(time.Second))
 
-	cmdLogger.Info("Loading and validating corpus from: ", colors.Bold, corpusDir, colors.Reset)
+		// Report results
+		invalidCount := len(result.InvalidSequences)
+		cmdLogger.Info(
+			"Results: ",
+			colors.Bold, result.ValidSequences, colors.Reset, " valid, ",
+			colors.Bold, invalidCount, colors.Reset, " invalid out of ",
+			colors.Bold, result.TotalSequences, colors.Reset, " total sequences",
+		)
 
-	// Create cleaner and run
-	cleaner := corpus.NewCorpusCleaner(fuzzerCorpus, cmdLogger)
-	start := time.Now()
-	result, err := cleaner.Clean(ctx, testChain, deployedContracts)
-	if err != nil {
-		cmdLogger.Error("Error during corpus cleaning", err)
-		return err
-	}
-	cmdLogger.Info("Corpus cleaning completed in ", time.Since(start).Round(time.Second))
+		if invalidCount > 0 {
+			cmdLogger.Info(colors.Bold, invalidCount, colors.Reset, " invalid sequences removed from disk")
+		}
+		if result.DeferredInitialResults > 0 {
+			cmdLogger.Info(result.DeferredInitialResults, " initial result manifest(s) preserved; property verification deferred to worker setup")
+		}
 
-	// Report results
-	invalidCount := len(result.InvalidSequences)
-	cmdLogger.Info(
-		"Results: ",
-		colors.Bold, result.ValidSequences, colors.Reset, " valid, ",
-		colors.Bold, invalidCount, colors.Reset, " invalid out of ",
-		colors.Bold, result.TotalSequences, colors.Reset, " total sequences",
-	)
-
-	if invalidCount > 0 {
-		cmdLogger.Info(colors.Bold, invalidCount, colors.Reset, " invalid sequences removed from disk")
-	}
-
-	return nil
+		return nil
+	})
 }

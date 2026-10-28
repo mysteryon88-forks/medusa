@@ -193,6 +193,14 @@ func (c *CheatCodeContract) Run(input []byte) ([]byte, error) {
 		return []byte{}, vm.ErrExecutionReverted
 	}
 
+	if isolated := c.tracer.chain.isolatedCall; isolated != nil && (methodInfo.method.Sig == "revertTo(uint256)" ||
+		(methodInfo.method.Sig == "ffi(string[])" && c.tracer.chain.testChainConfig.CheatCodeConfig.EnableFFI)) {
+		if isolated.err == nil {
+			isolated.err = fmt.Errorf("cheatcode %s is unavailable during an isolated call", methodInfo.method.Sig)
+		}
+		return nil, vm.ErrExecutionReverted
+	}
+
 	// Call the registered method handler.
 	outputValues, rawReturnData := methodInfo.handler(c.tracer, inputValues)
 

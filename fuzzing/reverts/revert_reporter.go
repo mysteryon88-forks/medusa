@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "embed"
@@ -26,6 +27,8 @@ var (
 
 // RevertReporter is responsible for tracking and storing the RevertMetrics for the fuzzing campaign.
 type RevertReporter struct {
+	running sync.WaitGroup
+	started bool
 	// Enabled determines if the reporter is enabled
 	Enabled bool
 
@@ -105,33 +108,62 @@ func (r *RevertReporter) AddCustomErrors(contractDefinitions contracts.Contracts
 	}
 }
 
-// Start starts the revert reporter goroutine. It will continue to run until the context is cancelled.
+// Start begins a fresh campaign after the preceding loop has completed.
+// Stop producers and cancel the preceding context before restarting. The reporter owns its channel; callers must not close it.
 func (r *RevertReporter) Start(ctx context.Context) {
 	// Don't do anything if the revert reporter is not enabled
 	if !r.Enabled {
 		return
 	}
+	r.Wait()
+	if r.started {
+		r.RevertMetrics.Finalize(r.PrevRevertMetrics)
+		r.PrevRevertMetrics = r.RevertMetrics
+	}
+	r.RevertMetrics = NewRevertMetrics()
+	r.started = true
+	updates, metrics, customErrors := r.RevertMetricsCh, r.RevertMetrics, r.CustomErrors
 
 	// Start the revert metrics update loop
+	r.running.Add(1)
 	go func() {
+		defer r.running.Done()
 		for {
 			select {
 			case <-ctx.Done():
-				// If the context is done, we need to exit the goroutine
-				return
-			case update := <-r.RevertMetricsCh:
-				// Update the revert metrics
-				r.RevertMetrics.Update(&update, r.CustomErrors)
+				// Producers have stopped; retain every update queued before cancellation.
+				for {
+					select {
+					case update, ok := <-updates:
+						if !ok {
+							return
+						}
+						metrics.Update(&update, customErrors)
+					default:
+						return
+					}
+				}
+			case update, ok := <-updates:
+				if !ok {
+					return
+				}
+				metrics.Update(&update, customErrors)
 			}
 		}
 	}()
 }
 
+// Wait joins the consumer after producers have stopped and its context has been cancelled.
+// It does not stop producers or cancel the context itself.
+func (r *RevertReporter) Wait() { r.running.Wait() }
+
 // BuildArtifacts writes the revert metrics to disk and also generates an HTML version of it for the user.
+// It waits for consumption to finish; stop producers and cancel the Start context first.
 func (r *RevertReporter) BuildArtifacts() error {
 	if !r.Enabled {
 		return nil
 	}
+	r.Wait()
 
 	// If we have a previous revert metrics, we need to merge them with the current revert metrics
 	r.RevertMetrics.Finalize(r.PrevRevertMetrics)

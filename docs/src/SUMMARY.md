@@ -29,6 +29,7 @@
 
 - [Testing Overview](./testing/overview.md)
 - [The Fuzzing Lifecycle](./testing/fuzzing_lifecycle.md)
+- [Initial Property Results](./testing/initial_results.md)
 - [Types of Invariants](./testing/invariants.md)
 - [Writing Function-Level Invariants](./testing/writing-function-level-invariants.md)
 - [Writing System-Level Invariants](./testing/writing-system-level-invariants.md)
@@ -38,6 +39,9 @@
 # API
 
 - [API Overview (WIP)](api/api_overview.md)
+- [Campaign metrics](api/metrics.md)
+- [Cancelling preparation](api/context.md)
+- [RFC: seeded campaigns](api/reproducibility.md)
 
 # Appendices
 

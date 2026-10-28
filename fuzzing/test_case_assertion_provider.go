@@ -1,7 +1,6 @@
 package fuzzing
 
 import (
-	"math/big"
 	"slices"
 	"sync"
 
@@ -78,6 +77,7 @@ func (t *AssertionTestCaseProvider) checkAssertionFailures(callSequence calls.Ca
 func (t *AssertionTestCaseProvider) onFuzzerStarting(event FuzzerStartingEvent) error {
 	// Reset our state
 	t.testCases = make(map[contracts.ContractMethodID]*AssertionTestCase)
+	byID := make(map[string]*AssertionTestCase)
 
 	// Create a test case for every test method.
 	for _, contract := range t.fuzzer.ContractDefinitions() {
@@ -99,10 +99,16 @@ func (t *AssertionTestCaseProvider) onFuzzerStarting(event FuzzerStartingEvent) 
 				callSequence:   nil,
 			}
 
-			// Add to our test cases and register them with the fuzzer
+			// Distinct source methods may share a public test ID.
+			if existing := byID[testCase.ID()]; existing != nil {
+				testCase = existing
+			} else {
+				byID[testCase.ID()] = testCase
+				t.fuzzer.RegisterTestCase(testCase)
+			}
+			// Keep every source-specific method available to each worker.
 			methodId := contracts.GetContractMethodID(contract, &method)
 			t.testCases[methodId] = testCase
-			t.fuzzer.RegisterTestCase(testCase)
 		}
 	}
 	return nil
@@ -112,11 +118,12 @@ func (t *AssertionTestCaseProvider) onFuzzerStarting(event FuzzerStartingEvent) 
 // have been destroyed. It clears state tracked for each FuzzerWorker and sets test cases in "running" states to
 // "passed".
 func (t *AssertionTestCaseProvider) onFuzzerStopping(event FuzzerStoppingEvent) error {
+	if event.err != nil {
+		return nil
+	}
 	// Loop through each test case and set any tests with a running status to a passed status.
 	for _, testCase := range t.testCases {
-		if testCase.status == TestCaseStatusRunning {
-			testCase.status = TestCaseStatusPassed
-		}
+		testCase.markPassed()
 	}
 	return nil
 }
@@ -149,8 +156,8 @@ func (t *AssertionTestCaseProvider) onWorkerDeployedContractAdded(event FuzzerWo
 		t.testCasesLock.Lock()
 		testCase, testCaseExists := t.testCases[methodId]
 		t.testCasesLock.Unlock()
-		if testCaseExists && testCase.Status() == TestCaseStatusNotStarted {
-			testCase.status = TestCaseStatusRunning
+		if testCaseExists {
+			testCase.markRunning()
 		}
 	}
 	return nil
@@ -212,11 +219,8 @@ func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorke
 				}
 
 				// Update our test state and report it finalized.
-				testCase.status = TestCaseStatusFailed
-				testCase.callSequence = &shrunkenCallSequence
-				worker.workerMetrics().failedSequences.Add(worker.workerMetrics().failedSequences, big.NewInt(1))
-				worker.Fuzzer().ReportTestCaseFinished(testCase)
-				return nil
+				_, err = t.finalizeFailure(worker, testCase, &shrunkenCallSequence)
+				return err
 			},
 			RecordResultInCorpus: true,
 		}
@@ -226,6 +230,16 @@ func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorke
 	}
 
 	return shrinkRequests, nil
+}
+
+func (t *AssertionTestCaseProvider) finalizeFailure(worker *FuzzerWorker, testCase *AssertionTestCase, sequence *calls.CallSequence) (bool, error) {
+	accepted, err := testCase.tryFinalizeFailure(sequence)
+	if err != nil || !accepted {
+		return false, err
+	}
+	worker.workerMetrics().recordFailure()
+	worker.Fuzzer().ReportTestCaseFinished(testCase)
+	return true, nil
 }
 
 // encounteredAssertionFailure takes in a panic code and a config.AssertionModesConfig and will determine whether the

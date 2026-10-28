@@ -63,11 +63,12 @@ func ExecuteInDirectory(t *testing.T, testPath string, method func()) {
 	// Change our working directory to the test directory
 	err = os.Chdir(testDirectory)
 	require.NoError(t, err)
+	defer func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	}()
 
 	// Execute the given method
 	method()
-
-	// Restore our working directory (we must leave the test directory or else clean up will fail post testing)
-	err = os.Chdir(cwd)
-	require.NoError(t, err)
 }
