@@ -21,11 +21,11 @@ named property again; it does not recreate a previous campaign's scheduling.
 
 ## Possible guarantees
 
-| Level | Proposed guarantee | Required work and cost |
-| --- | --- | --- |
-| Seeded PRNG | The same algorithm and seed produce the same random stream for the same ordered requests. | Route every RNG through an explicit campaign-owned source; define child seeds and reset semantics. Audit remaining global or clock-seeded sources. This does not guarantee the same generated campaign. |
+| Level                             | Proposed guarantee                                                                                                 | Required work and cost                                                                                                                                                                                                                                                  |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Seeded PRNG                       | The same algorithm and seed produce the same random stream for the same ordered requests.                          | Route every RNG through an explicit campaign-owned source; define child seeds and reset semantics. Audit remaining global or clock-seeded sources. This does not guarantee the same generated campaign.                                                                 |
 | Repeatable single-worker campaign | The same supported inputs and exact work budget reproduce generation, shrinking and final results with one worker. | Also stabilize ordering, corpus inputs, pruning and setup; pin artifacts, toolchain and EVM inputs. Add an exact work budget rather than relying on wall-clock timeout or the current periodically checked limit. Restrict uncontrolled callbacks, FFI and mutable RPC. |
-| Repeatable multi-worker campaign | The same supported inputs reproduce results across parallel runs. | Also order work assignment, shared corpus updates, pruning and failure publication. A deterministic coordinator or recorded scheduling protocol adds synchronization, storage or replay costs; ordinary OS scheduling is insufficient. |
+| Repeatable multi-worker campaign  | The same supported inputs reproduce results across parallel runs.                                                  | Also order work assignment, shared corpus updates, pruning and failure publication. A deterministic coordinator or recorded scheduling protocol adds synchronization, storage or replay costs; ordinary OS scheduling is insufficient.                                  |
 
 ## Acceptance before implementation
 
