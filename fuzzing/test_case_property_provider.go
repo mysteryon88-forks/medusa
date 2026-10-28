@@ -1,7 +1,9 @@
 package fuzzing
 
 import (
+	"errors"
 	"fmt"
+	"maps"
 	"math/big"
 	"slices"
 	"sync"
@@ -10,7 +12,9 @@ import (
 	"github.com/crytic/medusa/fuzzing/calls"
 	"github.com/crytic/medusa/fuzzing/config"
 	"github.com/crytic/medusa/fuzzing/contracts"
+	"github.com/crytic/medusa/fuzzing/corpus"
 	"github.com/crytic/medusa/fuzzing/executiontracer"
+	"github.com/crytic/medusa/utils"
 )
 
 // PropertyTestCaseProvider is a provider for on-chain property tests.
@@ -94,7 +98,10 @@ func (t *PropertyTestCaseProvider) checkPropertyTestFailed(worker *FuzzerWorker,
 		executionResult, err = worker.Chain().CallContract(msg.ToCoreMessage(), nil)
 	}
 	if err != nil {
-		return false, nil, fmt.Errorf("failed to call property test method: %v", err)
+		return false, nil, fmt.Errorf("failed to call property test method: %w", err)
+	}
+	if err := worker.chain.State().Error(); err != nil {
+		return false, nil, fmt.Errorf("property test state: %w", err)
 	}
 
 	// If our property test method call failed, we flag a failed test.
@@ -105,7 +112,7 @@ func (t *PropertyTestCaseProvider) checkPropertyTestFailed(worker *FuzzerWorker,
 	// Decode our ABI outputs
 	retVals, err := propertyTestMethod.Method.Outputs.Unpack(executionResult.Return())
 	if err != nil {
-		return false, nil, fmt.Errorf("failed to decode property test method return value: %v", err)
+		return false, nil, fmt.Errorf("failed to decode property test method return value: %w", err)
 	}
 
 	// We should have one return value.
@@ -165,12 +172,13 @@ func (t *PropertyTestCaseProvider) onFuzzerStarting(event FuzzerStartingEvent) e
 func (t *PropertyTestCaseProvider) onFuzzerStopping(event FuzzerStoppingEvent) error {
 	// Clear our property test methods
 	t.workerStates = nil
+	if event.err != nil {
+		return nil
+	}
 
 	// Loop through each test case and set any tests with a running status to a passed status.
 	for _, testCase := range t.testCases {
-		if testCase.status == TestCaseStatusRunning {
-			testCase.status = TestCaseStatusPassed
-		}
+		testCase.markPassed()
 	}
 	return nil
 }
@@ -212,9 +220,7 @@ func (t *PropertyTestCaseProvider) onWorkerDeployedContractAdded(event FuzzerWor
 		t.testCasesLock.Unlock()
 
 		if propertyTestCaseExists {
-			if propertyTestCase.Status() == TestCaseStatusNotStarted {
-				propertyTestCase.status = TestCaseStatusRunning
-			}
+			propertyTestCase.markRunning()
 			if propertyTestCase.Status() != TestCaseStatusFailed {
 				// Create our property test method reference.
 				workerState := &t.workerStates[event.Worker.WorkerIndex()]
@@ -332,11 +338,7 @@ func (t *PropertyTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorker
 					}
 
 					// Update our test state and report it finalized.
-					testCase.status = TestCaseStatusFailed
-					testCase.callSequence = &shrunkenCallSequence
-					testCase.propertyTestTrace = executionTrace
-					worker.workerMetrics().failedSequences.Add(worker.workerMetrics().failedSequences, big.NewInt(1))
-					worker.Fuzzer().ReportTestCaseFinished(testCase)
+					t.finalizeFailure(worker, testCase, &shrunkenCallSequence, executionTrace)
 					return nil
 				},
 				RecordResultInCorpus: true,
@@ -348,4 +350,109 @@ func (t *PropertyTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorker
 	}
 
 	return shrinkRequests, nil
+}
+
+func (t *PropertyTestCaseProvider) finalizeFailure(worker *FuzzerWorker, testCase *PropertyTestCase, sequence *calls.CallSequence, trace *executiontracer.ExecutionTrace) bool {
+	if !testCase.tryFinalizeFailure(sequence, trace) {
+		return false
+	}
+	t.reportFailure(worker, testCase)
+	return true
+}
+
+func (t *PropertyTestCaseProvider) reportFailure(worker *FuzzerWorker, testCase *PropertyTestCase) {
+	worker.workerMetrics().recordFailure()
+	worker.Fuzzer().ReportTestCaseFinished(testCase)
+}
+
+func (t *PropertyTestCaseProvider) checkInitialState(worker *FuzzerWorker) error {
+	state := &t.workerStates[worker.WorkerIndex()]
+	state.propertyTestMethodsLock.Lock()
+	methods := maps.Clone(state.propertyTestMethods)
+	state.propertyTestMethodsLock.Unlock()
+	for id, method := range methods {
+		if utils.CheckContextDone(worker.fuzzer.emergencyCtx) {
+			return worker.fuzzer.emergencyCtx.Err()
+		}
+		t.testCasesLock.Lock()
+		testCase := t.testCases[id]
+		t.testCasesLock.Unlock()
+		if testCase.Status() == TestCaseStatusFailed {
+			continue
+		}
+		record, recordErr := t.fuzzer.initialPropertyResult(worker, method, testCase.ID())
+		if recordErr != nil && (t.fuzzer.config.Fuzzing.CorpusDirectory != "" || !errors.Is(recordErr, errInitialUnrepresentable)) {
+			return recordErr
+		}
+		failed, _, err := t.checkPropertyTestFailed(worker, &method, false)
+		if err != nil {
+			return err
+		}
+		if !failed {
+			continue
+		}
+		failed, trace, err := t.checkPropertyTestFailed(worker, &method, true)
+		if err != nil {
+			return err
+		}
+		if !failed {
+			return fmt.Errorf("initial property %q did not fail on final evaluation", testCase.ID())
+		}
+		if recordErr == nil {
+			after, err := t.fuzzer.initialPropertyResult(worker, method, testCase.ID())
+			if err != nil {
+				return err
+			}
+			if !sameInitialInputs(record, after) {
+				return fmt.Errorf("initial property %q changed prepared inputs", testCase.ID())
+			}
+		}
+		var candidate *corpus.InitialPropertyResult
+		if recordErr == nil {
+			candidate = &record
+		}
+		if err := t.finalizeInitialFailure(worker, testCase, trace, candidate); err != nil {
+			return err
+		}
+		if t.fuzzer.config.Fuzzing.Testing.StopOnFailedTest {
+			return nil
+		}
+	}
+	return nil
+}
+
+func (t *PropertyTestCaseProvider) finalizeInitialFailure(worker *FuzzerWorker, testCase *PropertyTestCase, trace *executiontracer.ExecutionTrace, record *corpus.InitialPropertyResult) error {
+	for {
+		if err := t.fuzzer.emergencyCtx.Err(); err != nil {
+			return err
+		}
+		reservation, owner := testCase.beginInitialFailure()
+		if reservation == nil {
+			return nil
+		}
+		if !owner {
+			select {
+			case <-reservation:
+				continue
+			case <-t.fuzzer.emergencyCtx.Done():
+				return t.fuzzer.emergencyCtx.Err()
+			}
+		}
+		var err error
+		if record != nil {
+			err = t.fuzzer.corpus.SaveInitialPropertyResult(*record)
+		}
+		if err == nil {
+			err = t.fuzzer.emergencyCtx.Err()
+		}
+		sequence := calls.CallSequence{}
+		accepted := testCase.completeInitialFailure(reservation, &sequence, trace, err)
+		if err != nil {
+			return fmt.Errorf("save initial property %s: %w", testCase.ID(), err)
+		}
+		if accepted {
+			t.reportFailure(worker, testCase)
+		}
+		return nil
+	}
 }

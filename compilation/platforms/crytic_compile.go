@@ -1,6 +1,7 @@
 package platforms
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -91,6 +92,14 @@ func (c *CryticCompilationConfig) getArgs() ([]string, error) {
 // Compile uses the CryticCompilationConfig provided to compile a given target, parse the artifacts, and then
 // create a list of types.Compilation.
 func (c *CryticCompilationConfig) Compile() ([]types.Compilation, string, error) {
+	return c.CompileContext(context.Background())
+}
+
+// CompileContext cancels version checks, compiler installation and compilation as one operation.
+func (c *CryticCompilationConfig) CompileContext(ctx context.Context) ([]types.Compilation, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
 	// Resolve our export directory and delete it if already exists
 	exportDirectory := c.ExportDirectory
 	if exportDirectory == "" {
@@ -125,19 +134,25 @@ func (c *CryticCompilationConfig) Compile() ([]types.Compilation, string, error)
 
 		solc := exec.Command("solc", "--version")
 		solc.Env = cmd.Env
-		if solc.Run() != nil {
+		if _, _, _, versionErr := utils.RunCommandWithContext(ctx, solc); versionErr != nil {
+			if errors.Is(versionErr, utils.ErrCommandControl) {
+				return nil, "", versionErr
+			}
+			if ctx.Err() != nil {
+				return nil, "", errors.Join(versionErr, ctx.Err())
+			}
 			// the solc version was not installed
-			out, err := exec.Command("solc-select", "install", c.SolcVersion).CombinedOutput()
+			_, _, out, err := utils.RunCommandWithContext(ctx, exec.Command("solc-select", "install", c.SolcVersion))
 			if err != nil {
-				return nil, "", fmt.Errorf("error while executing `solc-select install`:\nOUTPUT:\n%s\nERROR: %s", string(out), err.Error())
+				return nil, "", fmt.Errorf("error while executing `solc-select install`:\nOUTPUT:\n%s\nERROR: %w", string(out), err)
 			}
 		}
 	}
 
 	// Run crytic-compile to compile and export our compilation artifacts.
-	out, err := cmd.CombinedOutput()
+	_, _, out, err := utils.RunCommandWithContext(ctx, cmd)
 	if err != nil {
-		return nil, "", fmt.Errorf("error while executing crytic-compile:\nOUTPUT:\n%s\nERROR: %s", string(out), err.Error())
+		return nil, "", fmt.Errorf("error while executing crytic-compile:\nOUTPUT:\n%s\nERROR: %w", string(out), err)
 	}
 
 	// Find compilation artifacts in the export directory
@@ -167,6 +182,9 @@ func (c *CryticCompilationConfig) Compile() ([]types.Compilation, string, error)
 
 	// Loop through each .json file for compilation units.
 	for i := 0; i < len(matches); i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
 		// Read the compiled JSON file data
 		b, err := os.ReadFile(matches[i])
 		if err != nil {
@@ -275,5 +293,8 @@ func (c *CryticCompilationConfig) Compile() ([]types.Compilation, string, error)
 		compilationList = append(compilationList, *compilation)
 	}
 	// Return the compilationList
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
 	return compilationList, string(out), nil
 }

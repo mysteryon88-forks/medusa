@@ -27,6 +27,8 @@ type CleanResult struct {
 	ValidSequences int
 	// InvalidSequences is the list of filenames that were invalid.
 	InvalidSequences []string
+	// DeferredInitialResults counts validated manifests whose properties must be replayed by a fuzzer worker.
+	DeferredInitialResults int
 }
 
 // NewCorpusCleaner creates a new CorpusCleaner.
@@ -58,8 +60,9 @@ func (cc *CorpusCleaner) Clean(
 	_ = testChain.RevertToBlockIndex(chainBaseIndex)
 
 	return &CleanResult{
-		TotalSequences:   cleanResult.TotalSequences,
-		ValidSequences:   cleanResult.ValidSequences,
-		InvalidSequences: cleanResult.InvalidSequences,
+		TotalSequences:         cleanResult.TotalSequences,
+		ValidSequences:         cleanResult.ValidSequences,
+		InvalidSequences:       cleanResult.InvalidSequences,
+		DeferredInitialResults: len(cc.corpus.InitialPropertyResults()),
 	}, nil
 }

@@ -61,6 +61,8 @@ func NewWeightedRandomChooserWithRand[T any](randomProvider *rand.Rand, randomPr
 
 // ChoiceCount returns the count of choices added to this provider.
 func (c *WeightedRandomChooser[T]) ChoiceCount() int {
+	c.randomProviderLock.Lock()
+	defer c.randomProviderLock.Unlock()
 	return len(c.Choices)
 }
 
@@ -97,14 +99,13 @@ func (c *WeightedRandomChooser[T]) RemoveChoices(indices map[int]bool) {
 
 // Choose selects a random weighted item from the WeightedRandomChooser, or returns an error if one occurs.
 func (c *WeightedRandomChooser[T]) Choose() (*T, error) {
+	c.randomProviderLock.Lock()
+	defer c.randomProviderLock.Unlock()
+
 	// If we have no choices or 0 total weight, return nil.
 	if len(c.Choices) == 0 || c.totalWeight.Cmp(big.NewInt(0)) == 0 {
 		return nil, fmt.Errorf("could not return a weighted random choice because no choices exist with non-zero weights")
 	}
-
-	// Acquire our lock during the duration of this method.
-	c.randomProviderLock.Lock()
-	defer c.randomProviderLock.Unlock()
 
 	// We'll want to randomly select a position in our total weight that will determine which item to return.
 	// If our total weight fits in an int64 and int is an int64 on this architecture, this is a quick calculation.

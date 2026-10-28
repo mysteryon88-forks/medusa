@@ -568,13 +568,14 @@ func (t *TestChain) CallContract(msg *core.Message, state types.MedusaStateDB, a
 
 	// Gather receipt for OnTxEnd
 	receipt := &gethTypes.Receipt{Type: tx.Type()}
-	if msgResult.Failed() {
-		receipt.Status = gethTypes.ReceiptStatusFailed
-	} else {
-		receipt.Status = gethTypes.ReceiptStatusSuccessful
+	receipt.Status = gethTypes.ReceiptStatusFailed
+	if msgResult != nil {
+		if !msgResult.Failed() {
+			receipt.Status = gethTypes.ReceiptStatusSuccessful
+		}
+		receipt.GasUsed = msgResult.UsedGas
 	}
 	receipt.TxHash = tx.Hash()
-	receipt.GasUsed = msgResult.UsedGas
 
 	// HACK: use OnTxEnd to store the execution trace.
 	// Need to explicitly call OnTxEnd
@@ -583,6 +584,11 @@ func (t *TestChain) CallContract(msg *core.Message, state types.MedusaStateDB, a
 	}
 
 	return msgResult, err
+}
+
+// ChainID returns an independent copy of the chain ID used to execute messages.
+func (t *TestChain) ChainID() *big.Int {
+	return new(big.Int).Set(t.chainConfig.ChainID)
 }
 
 // PendingBlockContext is the vm.BlockContext for the current pending block.

@@ -1,6 +1,7 @@
 package executiontracer
 
 import (
+	"maps"
 	"math/big"
 	"slices"
 
@@ -113,7 +114,9 @@ func (t *ExecutionTracer) Close() {
 // GetTrace returns the currently recording or last recorded execution trace by the tracer.
 func (t *ExecutionTracer) GetTrace(txHash common.Hash) *ExecutionTrace {
 	if trace, ok := t.traceMap[txHash]; ok {
-		return trace
+		snapshot := *trace
+		snapshot.labels = maps.Clone(trace.labels)
+		return &snapshot
 	}
 	return nil
 }

@@ -163,7 +163,7 @@ func (fw *FuzzerWorker) ValueMutator() valuegeneration.ValueMutator {
 // should have in the corpus' weighted random chooser.
 func (fw *FuzzerWorker) getNewCorpusCallSequenceWeight() *big.Int {
 	// Return our weight, ensuring it is non-zero.
-	return new(big.Int).Add(fw.workerMetrics().sequencesTested, big.NewInt(1))
+	return fw.workerMetrics().sequenceWeight()
 }
 
 // onChainContractDeploymentAddedEvent is the event callback used when the chain detects a new contract deployment.
@@ -395,9 +395,8 @@ func (fw *FuzzerWorker) testNextCallSequence() ([]ShrinkCallSequenceRequest, err
 		}
 
 		// Update our metrics
-		fw.workerMetrics().callsTested.Add(fw.workerMetrics().callsTested, big.NewInt(1))
 		lastCallSequenceElement := currentlyExecutedSequence[len(currentlyExecutedSequence)-1]
-		fw.workerMetrics().gasUsed.Add(fw.workerMetrics().gasUsed, new(big.Int).SetUint64(lastCallSequenceElement.ChainReference.Block.MessageResults[lastCallSequenceElement.ChainReference.TransactionIndex].Receipt.GasUsed))
+		fw.workerMetrics().recordCall(lastCallSequenceElement.ChainReference.Block.MessageResults[lastCallSequenceElement.ChainReference.TransactionIndex].Receipt.GasUsed)
 		fw.workerMetrics().updateRevertMetrics(lastCallSequenceElement)
 
 		// If our fuzzer context or the emergency context is cancelled, exit out immediately without results.
@@ -533,7 +532,8 @@ func (fw *FuzzerWorker) shrinkCallSequence(shrinkRequest ShrinkCallSequenceReque
 	shrinkAttempts := uint64(0)
 
 	// Set shrinking flag and log start
-	fw.workerMetrics().shrinking = true
+	fw.workerMetrics().setShrinking(true)
+	defer fw.workerMetrics().setShrinking(false)
 	fw.fuzzer.logger.Info("[Worker ", fw.workerIndex, "] Shrinking call sequence for ", colors.GreenBold,
 		shrinkRequest.TestName, colors.Bold, " with ", len(shrinkRequest.CallSequenceToShrink), " call(s)")
 
@@ -585,7 +585,7 @@ func (fw *FuzzerWorker) shrinkCallSequence(shrinkRequest ShrinkCallSequenceReque
 	fw.fuzzer.logger.Info("[Worker ", fw.workerIndex, "] Shrinking complete after ",
 		shrinkAttempts, " attempts (limit: ", shrinkLimit, ")")
 
-	fw.workerMetrics().shrinking = false
+	fw.workerMetrics().setShrinking(false)
 
 	// If the shrink request wanted the sequence recorded in the corpus, do so now.
 	if shrinkRequest.RecordResultInCorpus {
@@ -665,6 +665,7 @@ func (fw *FuzzerWorker) run(baseTestChain *chain.TestChain) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	defer fw.chain.Close()
 
 	// Register genesis-loaded contracts with their ABIs.
 	// These contracts are already deployed (loaded from genesis state) so they don't trigger
@@ -673,17 +674,19 @@ func (fw *FuzzerWorker) run(baseTestChain *chain.TestChain) (bool, error) {
 		if err := fw.fuzzer.applyGenesisContractMappings(fw.deployedContracts); err != nil {
 			return false, err
 		}
+		fw.updateMethods()
 		// Add only the genesis-mapped addresses to the value set so the fuzzer generates calls to them.
 		for addrStr := range fw.fuzzer.config.Fuzzing.TestChainConfig.GenesisContractMappings {
 			if addr, err := utils.HexStringToAddress(addrStr); err == nil {
 				fw.valueSet.AddAddress(addr)
+				if err := fw.Events.ContractAdded.Publish(FuzzerWorkerContractAddedEvent{
+					Worker: fw, ContractAddress: addr, ContractDefinition: fw.deployedContracts[addr],
+				}); err != nil {
+					return false, fmt.Errorf("mapped genesis contract subscriber: %w", err)
+				}
 			}
 		}
-		fw.updateMethods()
 	}
-
-	// Defer the closing of the test chain object
-	defer fw.chain.Close()
 
 	// Emit an event indicating the worker has set up its chain.
 	err = fw.Events.FuzzerWorkerChainSetup.Publish(FuzzerWorkerChainSetupEvent{
@@ -695,11 +698,26 @@ func (fw *FuzzerWorker) run(baseTestChain *chain.TestChain) (bool, error) {
 	}
 
 	// Increase our generation metric as we successfully generated a test node
-	fw.workerMetrics().workerStartupCount.Add(fw.workerMetrics().workerStartupCount, big.NewInt(1))
+	fw.workerMetrics().recordStartup()
 
 	// Save the current block index as all contracts have been deployed at this point, and we'll want to revert
 	// to this state between testing.
 	fw.testingBaseBlockIndex = uint64(len(fw.chain.CommittedBlocks()))
+	if provider := fw.fuzzer.propertyTestProvider; provider != nil && fw.fuzzer.config.Fuzzing.Testing.PropertyTesting.Enabled && (fw.fuzzer.config.Fuzzing.Testing.PropertyTesting.CheckInitialState || len(fw.fuzzer.initialResults) > 0) {
+		if err := provider.replayInitialResults(fw); err != nil {
+			return false, err
+		}
+		if fw.fuzzer.config.Fuzzing.Testing.PropertyTesting.CheckInitialState {
+			if err := provider.checkInitialState(fw); err != nil {
+				return false, err
+			}
+		}
+		if len(fw.stateChangingMethods)+len(fw.pureMethods)+len(fw.fallbackMethods) == 0 {
+			fw.fuzzer.logger.Info("Initial property checks completed; no callable methods, stopping")
+			fw.fuzzer.Stop()
+			return true, nil
+		}
+	}
 
 	// Enter the main fuzzing loop. In the main fuzzing loop, we will always handle shrink requests first.
 	// While there are no shrink requests, we will execute call sequence restricted by our memory database size based
@@ -774,7 +792,7 @@ func (fw *FuzzerWorker) run(baseTestChain *chain.TestChain) (bool, error) {
 		}
 
 		// Update our sequences tested metrics
-		fw.workerMetrics().sequencesTested.Add(fw.workerMetrics().sequencesTested, big.NewInt(1))
+		fw.workerMetrics().recordSequence()
 		sequencesTested++
 	}
 

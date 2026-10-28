@@ -1,7 +1,6 @@
 package fuzzing
 
 import (
-	"math/big"
 	"slices"
 	"sync"
 
@@ -112,11 +111,12 @@ func (t *AssertionTestCaseProvider) onFuzzerStarting(event FuzzerStartingEvent) 
 // have been destroyed. It clears state tracked for each FuzzerWorker and sets test cases in "running" states to
 // "passed".
 func (t *AssertionTestCaseProvider) onFuzzerStopping(event FuzzerStoppingEvent) error {
+	if event.err != nil {
+		return nil
+	}
 	// Loop through each test case and set any tests with a running status to a passed status.
 	for _, testCase := range t.testCases {
-		if testCase.status == TestCaseStatusRunning {
-			testCase.status = TestCaseStatusPassed
-		}
+		testCase.markPassed()
 	}
 	return nil
 }
@@ -149,8 +149,8 @@ func (t *AssertionTestCaseProvider) onWorkerDeployedContractAdded(event FuzzerWo
 		t.testCasesLock.Lock()
 		testCase, testCaseExists := t.testCases[methodId]
 		t.testCasesLock.Unlock()
-		if testCaseExists && testCase.Status() == TestCaseStatusNotStarted {
-			testCase.status = TestCaseStatusRunning
+		if testCaseExists {
+			testCase.markRunning()
 		}
 	}
 	return nil
@@ -212,10 +212,7 @@ func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorke
 				}
 
 				// Update our test state and report it finalized.
-				testCase.status = TestCaseStatusFailed
-				testCase.callSequence = &shrunkenCallSequence
-				worker.workerMetrics().failedSequences.Add(worker.workerMetrics().failedSequences, big.NewInt(1))
-				worker.Fuzzer().ReportTestCaseFinished(testCase)
+				t.finalizeFailure(worker, testCase, &shrunkenCallSequence)
 				return nil
 			},
 			RecordResultInCorpus: true,
@@ -226,6 +223,15 @@ func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorke
 	}
 
 	return shrinkRequests, nil
+}
+
+func (t *AssertionTestCaseProvider) finalizeFailure(worker *FuzzerWorker, testCase *AssertionTestCase, sequence *calls.CallSequence) bool {
+	if !testCase.tryFinalizeFailure(sequence) {
+		return false
+	}
+	worker.workerMetrics().recordFailure()
+	worker.Fuzzer().ReportTestCaseFinished(testCase)
+	return true
 }
 
 // encounteredAssertionFailure takes in a panic code and a config.AssertionModesConfig and will determine whether the

@@ -150,22 +150,16 @@ func cmdRunFuzz(cmd *cobra.Command, args []string) error {
 		cmdLogger.Warn("Disabling coverage may limit efficacy of fuzzing. Consider enabling coverage for better results.")
 	}
 
-	// Create our fuzzer
-	fuzzer, fuzzErr := fuzzing.NewFuzzer(*projectConfig)
+	ctx, stopSignals := signal.NotifyContext(cmd.Context(), os.Interrupt)
+	defer stopSignals()
+	// Preparation and the runtime readiness bridge share one durable signal context.
+	fuzzer, fuzzErr := fuzzing.NewFuzzerWithContext(ctx, *projectConfig)
 	if fuzzErr != nil {
 		return exitcodes.NewErrorWithExitCode(fuzzErr, exitcodes.ExitCodeHandledError)
 	}
 
-	// Stop our fuzzing on keyboard interrupts
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt)
-	go func() {
-		<-c
-		fuzzer.Terminate()
-	}()
-
 	// Start the fuzzing process with our cancellable context.
-	fuzzErr = fuzzer.Start()
+	fuzzErr = startWithSignalContext(ctx, fuzzer)
 	if fuzzErr != nil {
 		return exitcodes.NewErrorWithExitCode(fuzzErr, exitcodes.ExitCodeHandledError)
 	}

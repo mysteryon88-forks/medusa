@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync/atomic"
 	"testing"
 
 	"github.com/crytic/medusa/utils"
@@ -36,19 +37,19 @@ func TestFuzzerHooks(t *testing.T) {
 		},
 		method: func(f *fuzzerTestContext) {
 			// Attach to fuzzer hooks which simply set a success state.
-			var valueGenOk, chainSetupOk, callSeqTestFuncOk bool
+			var valueGenOk, chainSetupOk, callSeqTestFuncOk atomic.Bool
 			existingSeqGenConfigFunc := f.fuzzer.Hooks.NewCallSequenceGeneratorConfigFunc
 			f.fuzzer.Hooks.NewCallSequenceGeneratorConfigFunc = func(fuzzer *Fuzzer, valueSet *valuegeneration.ValueSet, randomProvider *rand.Rand) (*CallSequenceGeneratorConfig, error) {
-				valueGenOk = true
+				valueGenOk.Store(true)
 				return existingSeqGenConfigFunc(fuzzer, valueSet, randomProvider)
 			}
 			existingChainSetupFunc := f.fuzzer.Hooks.ChainSetupFunc
 			f.fuzzer.Hooks.ChainSetupFunc = func(fuzzer *Fuzzer, testChain *chain.TestChain) (*executiontracer.ExecutionTrace, error) {
-				chainSetupOk = true
+				chainSetupOk.Store(true)
 				return existingChainSetupFunc(fuzzer, testChain)
 			}
 			f.fuzzer.Hooks.CallSequenceTestFuncs = append(f.fuzzer.Hooks.CallSequenceTestFuncs, func(worker *FuzzerWorker, callSequence calls.CallSequence) ([]ShrinkCallSequenceRequest, error) {
-				callSeqTestFuncOk = true
+				callSeqTestFuncOk.Store(true)
 				return make([]ShrinkCallSequenceRequest, 0), nil
 			})
 
@@ -60,9 +61,9 @@ func TestFuzzerHooks(t *testing.T) {
 			assertFailedTestsExpected(f, true)
 
 			// Assert that our hooks worked
-			assert.True(t, valueGenOk, "could not hook value generator func")
-			assert.True(t, chainSetupOk, "could not hook chain setup func")
-			assert.True(t, callSeqTestFuncOk, "could not hook call sequence test func")
+			assert.True(t, valueGenOk.Load(), "could not hook value generator func")
+			assert.True(t, chainSetupOk.Load(), "could not hook chain setup func")
+			assert.True(t, callSeqTestFuncOk.Load(), "could not hook call sequence test func")
 		},
 	})
 }
@@ -682,12 +683,12 @@ func TestDeploymentsSelfDestruct(t *testing.T) {
 			method: func(f *fuzzerTestContext) {
 				// Subscribe to any mined block events globally. When receiving them, check contract changes for a
 				// self-destruct.
-				selfDestructCount := 0
+				var selfDestructCount atomic.Int64
 				events.SubscribeAny(func(event chain.PendingBlockCommittedEvent) error {
 					for _, messageResults := range event.Block.MessageResults {
 						for _, contractDeploymentChange := range messageResults.ContractDeploymentChanges {
 							if contractDeploymentChange.SelfDestructed {
-								selfDestructCount++
+								selfDestructCount.Add(1)
 							}
 						}
 					}
@@ -699,7 +700,7 @@ func TestDeploymentsSelfDestruct(t *testing.T) {
 				assert.NoError(t, err)
 
 				// When it's done, we should've had at least one self-destruction.
-				assert.Greater(t, selfDestructCount, 0, "no SELFDESTRUCT operations were detected, when they should have been.")
+				assert.Greater(t, selfDestructCount.Load(), int64(0), "no SELFDESTRUCT operations were detected, when they should have been.")
 			},
 		})
 	}
