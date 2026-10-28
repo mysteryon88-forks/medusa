@@ -101,6 +101,8 @@ func fakeCompilerPath(t *testing.T, block string) string {
 	t.Setenv("MEDUSA_FAKE_TOOL", "1")
 	t.Setenv("MEDUSA_TOOL_LOG", dir)
 	t.Setenv("MEDUSA_BLOCK_TOOL", block)
+	// Keep the race runtime's exit delay out of fake-tool startup time.
+	t.Setenv("GORACE", os.Getenv("GORACE")+" atexit_sleep_ms=0")
 	return dir
 }
 
