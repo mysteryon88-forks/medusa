@@ -96,7 +96,11 @@ func initialTestConfig(c *config.ProjectConfig) {
 
 func TestFuzzerInitialRepair(t *testing.T) {
 	runFuzzerTest(t, &fuzzerSolcFileTest{
-		filePath: "testdata/contracts/properties/initial_repair.sol", solcVersion: "0.8.25", configUpdates: initialTestConfig,
+		filePath: "testdata/contracts/properties/initial_repair.sol", solcVersion: "0.8.25",
+		configUpdates: func(c *config.ProjectConfig) {
+			initialTestConfig(c)
+			c.Fuzzing.Workers = 1
+		},
 		method: func(fc *fuzzerTestContext) {
 			t, f := fc.t, fc.fuzzer
 			require.False(t, f.config.Fuzzing.Testing.PropertyTesting.CheckInitialState)
