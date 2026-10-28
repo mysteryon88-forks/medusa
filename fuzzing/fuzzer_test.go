@@ -683,12 +683,12 @@ func TestDeploymentsSelfDestruct(t *testing.T) {
 			method: func(f *fuzzerTestContext) {
 				// Subscribe to any mined block events globally. When receiving them, check contract changes for a
 				// self-destruct.
-				selfDestructCount := 0
+				var selfDestructCount atomic.Int64
 				events.SubscribeAny(func(event chain.PendingBlockCommittedEvent) error {
 					for _, messageResults := range event.Block.MessageResults {
 						for _, contractDeploymentChange := range messageResults.ContractDeploymentChanges {
 							if contractDeploymentChange.SelfDestructed {
-								selfDestructCount++
+								selfDestructCount.Add(1)
 							}
 						}
 					}
@@ -700,7 +700,7 @@ func TestDeploymentsSelfDestruct(t *testing.T) {
 				assert.NoError(t, err)
 
 				// When it's done, we should've had at least one self-destruction.
-				assert.Greater(t, selfDestructCount, 0, "no SELFDESTRUCT operations were detected, when they should have been.")
+				assert.Greater(t, selfDestructCount.Load(), int64(0), "no SELFDESTRUCT operations were detected, when they should have been.")
 			},
 		})
 	}
