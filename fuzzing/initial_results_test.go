@@ -188,7 +188,12 @@ func TestInitialForkMemoryEvaluation(t *testing.T) {
 	method := contracts.DeployedContractMethod{Address: address, Contract: contract, Method: parsedABI.Methods["property_p"]}
 	id := contracts.GetContractMethodID(contract, &method.Method)
 	testCase := &PropertyTestCase{targetContract: contract, targetMethod: method.Method, status: TestCaseStatusRunning}
-	p := &PropertyTestCaseProvider{fuzzer: f, testCases: map[contracts.ContractMethodID]*PropertyTestCase{id: testCase}, workerStates: []propertyTestCaseProviderWorkerState{{propertyTestMethods: map[contracts.ContractMethodID]contracts.DeployedContractMethod{id: method}}}}
+	p := &PropertyTestCaseProvider{
+		fuzzer:         f,
+		testCases:      map[contracts.ContractMethodID]*PropertyTestCase{id: testCase},
+		methodStatuses: map[contracts.ContractMethodID]TestCaseStatus{id: TestCaseStatusRunning},
+		workerStates:   []propertyTestCaseProviderWorkerState{{propertyTestMethods: map[contracts.ContractMethodID]contracts.DeployedContractMethod{id: method}}},
+	}
 	require.NoError(t, p.checkInitialState(&FuzzerWorker{fuzzer: f, chain: ch}))
 	require.Equal(t, TestCaseStatusFailed, testCase.Status())
 	require.NotNil(t, testCase.CallSequence())

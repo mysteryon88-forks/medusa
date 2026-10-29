@@ -29,7 +29,10 @@ type PropertyTestCaseProvider struct {
 	// testCases is a map of contract-method IDs to property test cases.
 	testCases map[contracts.ContractMethodID]*PropertyTestCase
 
-	// testCasesLock is used for thread-synchronization when updating testCases
+	// methodStatuses tracks source-method progress independently of shared public result IDs.
+	methodStatuses map[contracts.ContractMethodID]TestCaseStatus
+
+	// testCasesLock guards testCases and methodStatuses across workers.
 	testCasesLock sync.Mutex
 
 	// workerStates is a slice where each element stores state for a given worker index.
@@ -135,6 +138,7 @@ func (t *PropertyTestCaseProvider) checkPropertyTestFailed(worker *FuzzerWorker,
 func (t *PropertyTestCaseProvider) onFuzzerStarting(event FuzzerStartingEvent) error {
 	// Reset our state
 	t.testCases = make(map[contracts.ContractMethodID]*PropertyTestCase)
+	t.methodStatuses = make(map[contracts.ContractMethodID]TestCaseStatus)
 	t.workerStates = make([]propertyTestCaseProviderWorkerState, t.fuzzer.Config().Fuzzing.Workers)
 	byID := make(map[string]*PropertyTestCase)
 
@@ -168,6 +172,7 @@ func (t *PropertyTestCaseProvider) onFuzzerStarting(event FuzzerStartingEvent) e
 			// Keep every source-specific method available to each worker.
 			methodId := contracts.GetContractMethodID(contract, &method)
 			t.testCases[methodId] = propertyTestCase
+			t.methodStatuses[methodId] = TestCaseStatusNotStarted
 		}
 	}
 	return nil
@@ -182,6 +187,15 @@ func (t *PropertyTestCaseProvider) onFuzzerStopping(event FuzzerStoppingEvent) e
 	if event.err != nil {
 		return nil
 	}
+
+	// Complete source states separately from the single public result for each ID.
+	t.testCasesLock.Lock()
+	for id, status := range t.methodStatuses {
+		if status == TestCaseStatusRunning {
+			t.methodStatuses[id] = TestCaseStatusPassed
+		}
+	}
+	t.testCasesLock.Unlock()
 
 	// Loop through each test case and set any tests with a running status to a passed status.
 	for _, testCase := range t.testCases {
@@ -224,11 +238,15 @@ func (t *PropertyTestCaseProvider) onWorkerDeployedContractAdded(event FuzzerWor
 		// our map for this worker. If we have any tests in a not-started state, we can signal a running state now.
 		t.testCasesLock.Lock()
 		propertyTestCase, propertyTestCaseExists := t.testCases[methodId]
+		if propertyTestCaseExists && t.methodStatuses[methodId] == TestCaseStatusNotStarted {
+			t.methodStatuses[methodId] = TestCaseStatusRunning
+		}
+		failed := t.methodStatuses[methodId] == TestCaseStatusFailed
 		t.testCasesLock.Unlock()
 
 		if propertyTestCaseExists {
 			propertyTestCase.markRunning()
-			if propertyTestCase.Status() != TestCaseStatusFailed {
+			if !failed {
 				// Create our property test method reference.
 				workerState := &t.workerStates[event.Worker.WorkerIndex()]
 				workerState.propertyTestMethodsLock.Lock()
@@ -291,10 +309,11 @@ func (t *PropertyTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorker
 		// Obtain the test case for this property test method
 		t.testCasesLock.Lock()
 		testCase := t.testCases[propertyTestMethodId]
+		failed := t.methodStatuses[propertyTestMethodId] == TestCaseStatusFailed
 		t.testCasesLock.Unlock()
 
-		// If the test case already failed, skip it
-		if testCase.Status() == TestCaseStatusFailed {
+		// Only a failure of this source method makes it ineligible for further checks.
+		if failed {
 			continue
 		}
 
@@ -346,6 +365,9 @@ func (t *PropertyTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorker
 
 					// Update our test state and report it finalized.
 					_, err = t.finalizeFailure(worker, testCase, &shrunkenCallSequence, executionTrace)
+					if err == nil {
+						t.markMethodFailed(propertyTestMethodId)
+					}
 					return err
 				},
 				RecordResultInCorpus: true,
@@ -385,7 +407,18 @@ func (t *PropertyTestCaseProvider) reportFailure(worker *FuzzerWorker, testCase 
 	worker.Fuzzer().ReportTestCaseFinished(testCase)
 }
 
+// markMethodFailed records source completion even when another source owns the public failure.
+func (t *PropertyTestCaseProvider) markMethodFailed(id contracts.ContractMethodID) {
+	t.testCasesLock.Lock()
+	t.methodStatuses[id] = TestCaseStatusFailed
+	t.testCasesLock.Unlock()
+}
+
 func (t *PropertyTestCaseProvider) checkInitialState(worker *FuzzerWorker) error {
+	// Initial checks require CallContract's isolated, no-pending-block execution mode.
+	if worker.chain.PendingBlock() != nil {
+		return fmt.Errorf("initial property checks require committed setup: uncommitted pending block")
+	}
 	state := &t.workerStates[worker.WorkerIndex()]
 	state.propertyTestMethodsLock.Lock()
 	methods := maps.Clone(state.propertyTestMethods)
@@ -396,8 +429,9 @@ func (t *PropertyTestCaseProvider) checkInitialState(worker *FuzzerWorker) error
 		}
 		t.testCasesLock.Lock()
 		testCase := t.testCases[id]
+		failed := t.methodStatuses[id] == TestCaseStatusFailed
 		t.testCasesLock.Unlock()
-		if testCase.Status() == TestCaseStatusFailed {
+		if failed {
 			continue
 		}
 		record, recordErr := t.fuzzer.initialPropertyResult(worker, method, testCase.ID())
@@ -434,6 +468,7 @@ func (t *PropertyTestCaseProvider) checkInitialState(worker *FuzzerWorker) error
 		if err := t.finalizeInitialFailure(worker, testCase, trace, candidate); err != nil {
 			return err
 		}
+		t.markMethodFailed(id)
 		if t.fuzzer.config.Fuzzing.Testing.StopOnFailedTest {
 			return nil
 		}

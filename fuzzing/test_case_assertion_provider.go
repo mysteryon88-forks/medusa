@@ -20,7 +20,10 @@ type AssertionTestCaseProvider struct {
 	// testCases is a map of contract-method IDs to assertion test cases.GetContractMethodID
 	testCases map[contracts.ContractMethodID]*AssertionTestCase
 
-	// testCasesLock is used for thread-synchronization when updating testCases
+	// methodStatuses tracks source-method progress independently of shared public result IDs.
+	methodStatuses map[contracts.ContractMethodID]TestCaseStatus
+
+	// testCasesLock guards testCases and methodStatuses across workers.
 	testCasesLock sync.Mutex
 }
 
@@ -77,6 +80,7 @@ func (t *AssertionTestCaseProvider) checkAssertionFailures(callSequence calls.Ca
 func (t *AssertionTestCaseProvider) onFuzzerStarting(event FuzzerStartingEvent) error {
 	// Reset our state
 	t.testCases = make(map[contracts.ContractMethodID]*AssertionTestCase)
+	t.methodStatuses = make(map[contracts.ContractMethodID]TestCaseStatus)
 	byID := make(map[string]*AssertionTestCase)
 
 	// Create a test case for every test method.
@@ -109,6 +113,7 @@ func (t *AssertionTestCaseProvider) onFuzzerStarting(event FuzzerStartingEvent) 
 			// Keep every source-specific method available to each worker.
 			methodId := contracts.GetContractMethodID(contract, &method)
 			t.testCases[methodId] = testCase
+			t.methodStatuses[methodId] = TestCaseStatusNotStarted
 		}
 	}
 	return nil
@@ -121,6 +126,14 @@ func (t *AssertionTestCaseProvider) onFuzzerStopping(event FuzzerStoppingEvent) 
 	if event.err != nil {
 		return nil
 	}
+	// Complete source states separately from the single public result for each ID.
+	t.testCasesLock.Lock()
+	for id, status := range t.methodStatuses {
+		if status == TestCaseStatusRunning {
+			t.methodStatuses[id] = TestCaseStatusPassed
+		}
+	}
+	t.testCasesLock.Unlock()
 	// Loop through each test case and set any tests with a running status to a passed status.
 	for _, testCase := range t.testCases {
 		testCase.markPassed()
@@ -155,6 +168,9 @@ func (t *AssertionTestCaseProvider) onWorkerDeployedContractAdded(event FuzzerWo
 		// our map for this worker. If we have any tests in a not-started state, we can signal a running state now.
 		t.testCasesLock.Lock()
 		testCase, testCaseExists := t.testCases[methodId]
+		if testCaseExists && t.methodStatuses[methodId] == TestCaseStatusNotStarted {
+			t.methodStatuses[methodId] = TestCaseStatusRunning
+		}
 		t.testCasesLock.Unlock()
 		if testCaseExists {
 			testCase.markRunning()
@@ -180,6 +196,7 @@ func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorke
 	// Obtain the test case for this method we're targeting for assertion testing.
 	t.testCasesLock.Lock()
 	testCase, testCaseExists := t.testCases[*methodId]
+	failed := t.methodStatuses[*methodId] == TestCaseStatusFailed
 	t.testCasesLock.Unlock()
 
 	// Verify a test case exists for this method called (if we're not assertion testing this method, stop)
@@ -187,8 +204,8 @@ func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorke
 		return shrinkRequests, nil
 	}
 
-	// If the test case already failed, skip it
-	if testCase.Status() == TestCaseStatusFailed {
+	// Only a failure of this source method makes it ineligible for further checks.
+	if failed {
 		return shrinkRequests, nil
 	}
 
@@ -220,6 +237,9 @@ func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorke
 
 				// Update our test state and report it finalized.
 				_, err = t.finalizeFailure(worker, testCase, &shrunkenCallSequence)
+				if err == nil {
+					t.markMethodFailed(*methodId)
+				}
 				return err
 			},
 			RecordResultInCorpus: true,
@@ -230,6 +250,13 @@ func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorke
 	}
 
 	return shrinkRequests, nil
+}
+
+// markMethodFailed records source completion even when another source owns the public failure.
+func (t *AssertionTestCaseProvider) markMethodFailed(id contracts.ContractMethodID) {
+	t.testCasesLock.Lock()
+	t.methodStatuses[id] = TestCaseStatusFailed
+	t.testCasesLock.Unlock()
 }
 
 func (t *AssertionTestCaseProvider) finalizeFailure(worker *FuzzerWorker, testCase *AssertionTestCase, sequence *calls.CallSequence) (bool, error) {

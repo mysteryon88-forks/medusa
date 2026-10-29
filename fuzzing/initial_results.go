@@ -141,6 +141,7 @@ func (t *PropertyTestCaseProvider) replayInitialResults(worker *FuzzerWorker) er
 	type reproduced struct {
 		testCase *PropertyTestCase
 		trace    *executiontracer.ExecutionTrace
+		methodID contracts.ContractMethodID
 	}
 	failures := make([]reproduced, 0, len(t.fuzzer.initialResults))
 	for _, saved := range t.fuzzer.initialResults {
@@ -194,7 +195,7 @@ func (t *PropertyTestCaseProvider) replayInitialResults(worker *FuzzerWorker) er
 		if !sameInitialInputs(current, after) {
 			return fmt.Errorf("initial replay incompatible: %s: property evaluation changed prepared inputs", label)
 		}
-		failures = append(failures, reproduced{testCase, trace})
+		failures = append(failures, reproduced{testCase, trace, contracts.GetContractMethodID(method.Contract, &method.Method)})
 	}
 	// Validate every loaded record before reporting a failure can trigger StopOnFailedTest.
 	if err := t.fuzzer.emergencyCtx.Err(); err != nil {
@@ -208,6 +209,7 @@ func (t *PropertyTestCaseProvider) replayInitialResults(worker *FuzzerWorker) er
 		if _, err := t.finalizeFailure(worker, failure.testCase, &sequence, failure.trace); err != nil {
 			return err
 		}
+		t.markMethodFailed(failure.methodID)
 	}
 	return nil
 }

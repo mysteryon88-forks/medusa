@@ -10,6 +10,11 @@ hooks, shrink sequences, or increment fuzz call, sequence or gas counters. The f
 The check repeats after worker reset; already finalized failures are retained. With no callable methods, a completed
 initial check ends the campaign explicitly.
 
+Setup must commit or discard any pending block before initial checks. Otherwise `Start()` returns an error before
+evaluating properties, even without a corpus directory or when no property remains eligible for evaluation.
+Methods from different source paths retain independent execution status when they share a public test ID. A failure
+in one source does not suppress the others; the public ID still reports only its first finalized failure.
+
 Initial property calls use `TestChain.CallContract` without a pending block, so temporary block-context, label, VM
 configuration and state changes are discarded. In this isolated mode, `revertTo` and enabled `ffi` calls return an
 infrastructure error even if Solidity catches the EVM revert: those operations can invalidate the isolation snapshot
