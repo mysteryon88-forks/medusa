@@ -48,7 +48,12 @@ func TestRacePropertyResult(t *testing.T) {
 			defer writers.Done()
 			<-start
 			w := &FuzzerWorker{fuzzer: f, workerIndex: i}
-			if p.finalizeFailure(w, c, &sequences[i], traces[i]) {
+			ok, err := p.finalizeFailure(w, c, &sequences[i], traces[i])
+			if err != nil {
+				t.Errorf("finalize property: %v", err)
+				return
+			}
+			if ok {
 				accepted <- i
 			}
 		}(i)
@@ -59,7 +64,8 @@ func TestRacePropertyResult(t *testing.T) {
 	close(accepted)
 	require.Len(t, accepted, 1)
 	winner := <-accepted
-	require.Same(t, &sequences[winner], c.CallSequence())
+	require.NotSame(t, &sequences[winner], c.CallSequence())
+	require.Equal(t, sequences[winner], *c.CallSequence())
 	require.Same(t, traces[winner], c.propertyTestTrace)
 	require.Equal(t, TestCaseStatusFailed, c.Status())
 	require.EqualValues(t, 1, f.metrics.FailedSequences().Int64())
@@ -98,7 +104,12 @@ func TestRaceAssertionResult(t *testing.T) {
 		go func(i int) {
 			defer writers.Done()
 			<-start
-			if p.finalizeFailure(&FuzzerWorker{fuzzer: f, workerIndex: i}, c, &sequences[i]) {
+			ok, err := p.finalizeFailure(&FuzzerWorker{fuzzer: f, workerIndex: i}, c, &sequences[i])
+			if err != nil {
+				t.Errorf("finalize assertion: %v", err)
+				return
+			}
+			if ok {
 				accepted <- i
 			}
 		}(i)
@@ -109,7 +120,8 @@ func TestRaceAssertionResult(t *testing.T) {
 	close(accepted)
 	require.Len(t, accepted, 1)
 	winner := <-accepted
-	require.Same(t, &sequences[winner], c.CallSequence())
+	require.NotSame(t, &sequences[winner], c.CallSequence())
+	require.Equal(t, sequences[winner], *c.CallSequence())
 	require.Equal(t, TestCaseStatusFailed, c.Status())
 	require.EqualValues(t, 1, f.metrics.FailedSequences().Int64())
 	require.Len(t, f.testCasesFinished, 1)

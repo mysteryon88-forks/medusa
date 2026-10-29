@@ -77,6 +77,7 @@ func (t *AssertionTestCaseProvider) checkAssertionFailures(callSequence calls.Ca
 func (t *AssertionTestCaseProvider) onFuzzerStarting(event FuzzerStartingEvent) error {
 	// Reset our state
 	t.testCases = make(map[contracts.ContractMethodID]*AssertionTestCase)
+	byID := make(map[string]*AssertionTestCase)
 
 	// Create a test case for every test method.
 	for _, contract := range t.fuzzer.ContractDefinitions() {
@@ -98,10 +99,16 @@ func (t *AssertionTestCaseProvider) onFuzzerStarting(event FuzzerStartingEvent) 
 				callSequence:   nil,
 			}
 
-			// Add to our test cases and register them with the fuzzer
+			// Distinct source methods may share a public test ID.
+			if existing := byID[testCase.ID()]; existing != nil {
+				testCase = existing
+			} else {
+				byID[testCase.ID()] = testCase
+				t.fuzzer.RegisterTestCase(testCase)
+			}
+			// Keep every source-specific method available to each worker.
 			methodId := contracts.GetContractMethodID(contract, &method)
 			t.testCases[methodId] = testCase
-			t.fuzzer.RegisterTestCase(testCase)
 		}
 	}
 	return nil
@@ -212,8 +219,8 @@ func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorke
 				}
 
 				// Update our test state and report it finalized.
-				t.finalizeFailure(worker, testCase, &shrunkenCallSequence)
-				return nil
+				_, err = t.finalizeFailure(worker, testCase, &shrunkenCallSequence)
+				return err
 			},
 			RecordResultInCorpus: true,
 		}
@@ -225,13 +232,14 @@ func (t *AssertionTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorke
 	return shrinkRequests, nil
 }
 
-func (t *AssertionTestCaseProvider) finalizeFailure(worker *FuzzerWorker, testCase *AssertionTestCase, sequence *calls.CallSequence) bool {
-	if !testCase.tryFinalizeFailure(sequence) {
-		return false
+func (t *AssertionTestCaseProvider) finalizeFailure(worker *FuzzerWorker, testCase *AssertionTestCase, sequence *calls.CallSequence) (bool, error) {
+	accepted, err := testCase.tryFinalizeFailure(sequence)
+	if err != nil || !accepted {
+		return false, err
 	}
 	worker.workerMetrics().recordFailure()
 	worker.Fuzzer().ReportTestCaseFinished(testCase)
-	return true
+	return true, nil
 }
 
 // encounteredAssertionFailure takes in a panic code and a config.AssertionModesConfig and will determine whether the

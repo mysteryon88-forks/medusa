@@ -107,16 +107,23 @@ func (t *PropertyTestCase) markPassed() {
 	}
 }
 
-func (t *PropertyTestCase) tryFinalizeFailure(sequence *calls.CallSequence, trace *executiontracer.ExecutionTrace) bool {
+func (t *PropertyTestCase) tryFinalizeFailure(sequence *calls.CallSequence, trace *executiontracer.ExecutionTrace) (bool, <-chan struct{}, error) {
 	t.resultLock.Lock()
 	defer t.resultLock.Unlock()
-	if t.status == TestCaseStatusFailed || t.pendingInitialFailure != nil {
-		return false
+	if t.status == TestCaseStatusFailed {
+		return false, nil, nil
 	}
-	t.callSequence = sequence
+	if t.pendingInitialFailure != nil {
+		return false, t.pendingInitialFailure, nil
+	}
+	snapshot, err := snapshotTestSequence(*sequence)
+	if err != nil {
+		return false, nil, fmt.Errorf("snapshot property failure: %w", err)
+	}
+	t.callSequence = &snapshot
 	t.propertyTestTrace = trace
 	t.status = TestCaseStatusFailed
-	return true
+	return true, nil, nil
 }
 
 func (t *PropertyTestCase) beginInitialFailure() (chan struct{}, bool) {

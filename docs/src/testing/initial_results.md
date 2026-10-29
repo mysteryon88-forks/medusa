@@ -10,6 +10,12 @@ hooks, shrink sequences, or increment fuzz call, sequence or gas counters. The f
 The check repeats after worker reset; already finalized failures are retained. With no callable methods, a completed
 initial check ends the campaign explicitly.
 
+Initial property calls use `TestChain.CallContract` without a pending block, so temporary block-context, label, VM
+configuration and state changes are discarded. In this isolated mode, `revertTo` and enabled `ffi` calls return an
+infrastructure error even if Solidity catches the EVM revert: those operations can invalidate the isolation snapshot
+or perform effects outside the chain. Calls made with a pending block keep their existing behavior. The `snapshot()`
+cheatcode returns its ABI `uint256` value; a snapshot created during an isolated call is discarded when that call ends.
+
 ## Storage
 
 With `corpusDirectory` configured, a failure is saved immediately, even with coverage disabled, as

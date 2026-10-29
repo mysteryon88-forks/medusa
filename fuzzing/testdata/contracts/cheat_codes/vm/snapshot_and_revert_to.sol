@@ -18,7 +18,6 @@ struct Storage {
 
 contract TestContract {
     Storage store;
-    uint256 timestamp;
 
     function test() public {
         // Obtain our cheat code contract reference.
@@ -28,7 +27,6 @@ contract TestContract {
 
         store.slot0 = 10;
         store.slot1 = 20;
-        timestamp = block.timestamp;
         cheats.deal(address(this), 5 ether);
 
         // Save state
@@ -53,6 +51,7 @@ contract TestContract {
         assert(store.slot0 == 10);
         assert(store.slot1 == 20);
         assert(address(this).balance == 5 ether);
-        assert(block.timestamp == timestamp);
+        // warp updates pending block context outside the StateDB snapshot.
+        assert(block.timestamp == 12345);
     }
 }

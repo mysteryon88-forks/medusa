@@ -1079,6 +1079,7 @@ func (f *Fuzzer) Start() error {
 	var monitoring sync.WaitGroup
 	stopServices := func() {
 		stopMonitoring()
+		f.ctxCancelFunc()
 		stopReporter()
 		monitoring.Wait()
 		f.corpusPruner.Wait()

@@ -136,6 +136,7 @@ func (t *PropertyTestCaseProvider) onFuzzerStarting(event FuzzerStartingEvent) e
 	// Reset our state
 	t.testCases = make(map[contracts.ContractMethodID]*PropertyTestCase)
 	t.workerStates = make([]propertyTestCaseProviderWorkerState, t.fuzzer.Config().Fuzzing.Workers)
+	byID := make(map[string]*PropertyTestCase)
 
 	// Create a test case for every property test method.
 	for _, contract := range t.fuzzer.ContractDefinitions() {
@@ -157,10 +158,16 @@ func (t *PropertyTestCaseProvider) onFuzzerStarting(event FuzzerStartingEvent) e
 				callSequence:   nil,
 			}
 
-			// Add to our test cases and register them with the fuzzer
+			// Distinct source methods may share a public test ID.
+			if existing := byID[propertyTestCase.ID()]; existing != nil {
+				propertyTestCase = existing
+			} else {
+				byID[propertyTestCase.ID()] = propertyTestCase
+				t.fuzzer.RegisterTestCase(propertyTestCase)
+			}
+			// Keep every source-specific method available to each worker.
 			methodId := contracts.GetContractMethodID(contract, &method)
 			t.testCases[methodId] = propertyTestCase
-			t.fuzzer.RegisterTestCase(propertyTestCase)
 		}
 	}
 	return nil
@@ -338,8 +345,8 @@ func (t *PropertyTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorker
 					}
 
 					// Update our test state and report it finalized.
-					t.finalizeFailure(worker, testCase, &shrunkenCallSequence, executionTrace)
-					return nil
+					_, err = t.finalizeFailure(worker, testCase, &shrunkenCallSequence, executionTrace)
+					return err
 				},
 				RecordResultInCorpus: true,
 			}
@@ -352,12 +359,25 @@ func (t *PropertyTestCaseProvider) callSequencePostCallTest(worker *FuzzerWorker
 	return shrinkRequests, nil
 }
 
-func (t *PropertyTestCaseProvider) finalizeFailure(worker *FuzzerWorker, testCase *PropertyTestCase, sequence *calls.CallSequence, trace *executiontracer.ExecutionTrace) bool {
-	if !testCase.tryFinalizeFailure(sequence, trace) {
-		return false
+func (t *PropertyTestCaseProvider) finalizeFailure(worker *FuzzerWorker, testCase *PropertyTestCase, sequence *calls.CallSequence, trace *executiontracer.ExecutionTrace) (bool, error) {
+	for {
+		accepted, reservation, err := testCase.tryFinalizeFailure(sequence, trace)
+		if err != nil {
+			return false, err
+		}
+		if reservation != nil {
+			select {
+			case <-reservation:
+				continue
+			case <-worker.fuzzer.emergencyCtx.Done():
+				return false, worker.fuzzer.emergencyCtx.Err()
+			}
+		}
+		if accepted {
+			t.reportFailure(worker, testCase)
+		}
+		return accepted, nil
 	}
-	t.reportFailure(worker, testCase)
-	return true
 }
 
 func (t *PropertyTestCaseProvider) reportFailure(worker *FuzzerWorker, testCase *PropertyTestCase) {

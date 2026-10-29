@@ -128,7 +128,10 @@ func TestInitialReportingReentrant(t *testing.T) {
 	f.RegisterTestCase(c)
 	_ = f.TestCasesWithStatus(TestCaseStatusRunning)
 	sequence := calls.CallSequence{}
-	require.True(t, base.tryFinalizeFailure(&sequence, nil))
+	accepted, pending, err := base.tryFinalizeFailure(&sequence, nil)
+	require.NoError(t, err)
+	require.Nil(t, pending)
+	require.True(t, accepted)
 	f.ReportTestCaseFinished(c)
 	require.False(t, held.Load(), "logger/TestCase callbacks must not run under testCasesLock")
 	snapshot := f.TestCases()
@@ -144,7 +147,10 @@ func TestInitialReservation(t *testing.T) {
 	require.False(t, owner)
 	require.Equal(t, reservation, other)
 	sequence := calls.CallSequence{}
-	require.False(t, c.tryFinalizeFailure(&sequence, nil))
+	accepted, pending, err := c.tryFinalizeFailure(&sequence, nil)
+	require.NoError(t, err)
+	require.False(t, accepted)
+	require.Equal(t, (<-chan struct{})(reservation), pending)
 	require.False(t, c.completeInitialFailure(reservation, &sequence, nil, errors.New("disk failed")))
 	select {
 	case <-other:
@@ -155,7 +161,10 @@ func TestInitialReservation(t *testing.T) {
 	reservation, owner = c.beginInitialFailure()
 	require.True(t, owner)
 	require.True(t, c.completeInitialFailure(reservation, &sequence, nil, nil))
-	require.False(t, c.tryFinalizeFailure(&sequence, nil))
+	accepted, pending, err = c.tryFinalizeFailure(&sequence, nil)
+	require.NoError(t, err)
+	require.False(t, accepted)
+	require.Nil(t, pending)
 	reservation, owner = c.beginInitialFailure()
 	require.False(t, owner)
 	require.Nil(t, reservation)

@@ -92,13 +92,17 @@ func (t *AssertionTestCase) markPassed() {
 	}
 }
 
-func (t *AssertionTestCase) tryFinalizeFailure(sequence *calls.CallSequence) bool {
+func (t *AssertionTestCase) tryFinalizeFailure(sequence *calls.CallSequence) (bool, error) {
 	t.resultLock.Lock()
 	defer t.resultLock.Unlock()
 	if t.status == TestCaseStatusFailed {
-		return false
+		return false, nil
 	}
-	t.callSequence = sequence
+	snapshot, err := snapshotTestSequence(*sequence)
+	if err != nil {
+		return false, fmt.Errorf("snapshot assertion failure: %w", err)
+	}
+	t.callSequence = &snapshot
 	t.status = TestCaseStatusFailed
-	return true
+	return true, nil
 }

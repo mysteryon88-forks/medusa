@@ -31,6 +31,7 @@ RUN apt-get update && \
         curl \
         git \
         jq \
+        libatomic1 \
         python3 \
         && \
     rm -rf /var/lib/apt/lists/*

@@ -205,7 +205,9 @@ func (t *PropertyTestCaseProvider) replayInitialResults(worker *FuzzerWorker) er
 			return err
 		}
 		sequence := calls.CallSequence{}
-		t.finalizeFailure(worker, failure.testCase, &sequence, failure.trace)
+		if _, err := t.finalizeFailure(worker, failure.testCase, &sequence, failure.trace); err != nil {
+			return err
+		}
 	}
 	return nil
 }

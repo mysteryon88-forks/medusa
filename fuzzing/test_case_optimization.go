@@ -140,11 +140,11 @@ func (t *OptimizationTestCase) finish() {
 }
 
 func (t *OptimizationTestCase) updateCandidate(value *big.Int, sequence calls.CallSequence, request *ShrinkCallSequenceRequest) (bool, error) {
-	resultSequence, err := snapshotOptimizationSequence(sequence)
+	resultSequence, err := snapshotTestSequence(sequence)
 	if err != nil {
 		return false, err
 	}
-	requestSequence, err := snapshotOptimizationSequence(sequence)
+	requestSequence, err := snapshotTestSequence(sequence)
 	if err != nil {
 		return false, err
 	}
@@ -168,7 +168,7 @@ func (t *OptimizationTestCase) takeShrinkRequest() *ShrinkCallSequenceRequest {
 }
 
 func (t *OptimizationTestCase) updateFinal(value *big.Int, sequence calls.CallSequence, trace *executiontracer.ExecutionTrace) (bool, error) {
-	resultSequence, err := snapshotOptimizationSequence(sequence)
+	resultSequence, err := snapshotTestSequence(sequence)
 	if err != nil {
 		return false, err
 	}
@@ -182,7 +182,7 @@ func (t *OptimizationTestCase) updateFinal(value *big.Int, sequence calls.CallSe
 	return true, nil
 }
 
-func snapshotOptimizationSequence(sequence calls.CallSequence) (calls.CallSequence, error) {
+func snapshotTestSequence(sequence calls.CallSequence) (calls.CallSequence, error) {
 	result, err := sequence.Clone()
 	if err != nil {
 		return nil, err

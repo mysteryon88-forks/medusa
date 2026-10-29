@@ -546,7 +546,7 @@ func getStandardCheatCodeContract(tracer *cheatCodeTracer) (*CheatCodeContract, 
 		func(tracer *cheatCodeTracer, inputs []any) ([]any, *cheatCodeRawReturnData) {
 			snapshotID := tracer.chain.State().Snapshot()
 
-			return []any{snapshotID}, nil
+			return []any{new(big.Int).SetUint64(uint64(snapshotID))}, nil
 		},
 	)
 
