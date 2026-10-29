@@ -34,7 +34,8 @@ jobs:
     needs: [lint]
     strategy:
       matrix:
-        environment: [ubuntu-latest, macos-26, windows-latest]
+        # Keep required macOS jobs out of the capacity-constrained hosted ARM64 pool.
+        environment: [ubuntu-latest, macos-26-intel, windows-latest]
     permissions:
       contents: read
       id-token: write
@@ -74,6 +75,13 @@ jobs:
       - name: Compress (Linux and macOS)
         if: runner.os == 'Linux' || runner.os == 'macOS'
         run: tar -czvf medusa-${{ runner.os }}-${{ runner.arch }}.tar.gz medusa
+
+      - name: Build and compress macOS ARM64
+        if: runner.os == 'macOS' && runner.arch == 'X64'
+        run: |
+          mkdir -p "$RUNNER_TEMP/medusa-arm64"
+          CGO_ENABLED=0 GOARCH=arm64 go build -o "$RUNNER_TEMP/medusa-arm64/medusa" -v .
+          tar -czvf medusa-macOS-ARM64.tar.gz -C "$RUNNER_TEMP/medusa-arm64" medusa
 
       - name: Build (Windows)
         if: runner.os == 'Windows'
@@ -188,7 +196,7 @@ jobs:
   test:
     strategy:
       matrix:
-        environment: [ubuntu-latest, macos-26, windows-latest]
+        environment: [ubuntu-latest, macos-26-intel, windows-latest]
 
     runs-on: ${{ matrix.environment }}
     timeout-minutes: 20
