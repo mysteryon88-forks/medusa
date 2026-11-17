@@ -236,11 +236,12 @@ func TestOptimizationShutdownAbortReleasesWaiter(t *testing.T) {
 				close(release)
 			}
 			err := joinOptimizationShutdown(t, done)
-			if stage == "terminate" {
+			switch stage {
+			case "terminate":
 				require.NoError(t, err)
-			} else if stage == "constructor" || stage == "created" || stage == "destroyed" {
+			case "constructor", "created", "destroyed":
 				require.ErrorIs(t, err, want)
-			} else {
+			default:
 				require.ErrorContains(t, err, want.Error())
 			}
 		})
