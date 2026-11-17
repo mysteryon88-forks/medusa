@@ -23,13 +23,10 @@ type OptimizationTestCaseProvider struct {
 	// fuzzer describes the Fuzzer which this provider is attached to.
 	fuzzer *Fuzzer
 
-	// shrinkingRequested describes whether the optimization provider has already requested a worker to complete the
-	// provider's outstanding shrink requests. If the requests have already gone through, other workers can continue
-	// their operations.
-	shrinkingRequested bool
-
-	// shrinkingRequestedLock is used for thread-synchronization with reading and updating shrinkingRequested
-	shrinkingRequestedLock sync.Mutex
+	// completedWorkers counts terminal slot arrivals; the last arrival owns final shrinking.
+	completedWorkers int
+	completionLock   sync.Mutex
+	completionReady  chan struct{}
 
 	// testCases is a map of contract-method IDs to optimization test cases.
 	testCases map[contracts.ContractMethodID]*OptimizationTestCase
@@ -133,9 +130,10 @@ func (t *OptimizationTestCaseProvider) runOptimizationTest(worker *FuzzerWorker,
 // onFuzzerStarting is the event handler triggered when the Fuzzer is starting a fuzzing campaign. It creates test cases
 // in a "not started" state for every optimization test method discovered in the contract definitions known to the Fuzzer.
 func (t *OptimizationTestCaseProvider) onFuzzerStarting(event FuzzerStartingEvent) error {
-	t.shrinkingRequestedLock.Lock()
-	t.shrinkingRequested = false
-	t.shrinkingRequestedLock.Unlock()
+	t.completionLock.Lock()
+	t.completedWorkers = 0
+	t.completionReady = make(chan struct{})
+	t.completionLock.Unlock()
 	// Reset our state
 	t.testCases = make(map[contracts.ContractMethodID]*OptimizationTestCase)
 	t.workerStates = make([]optimizationTestCaseProviderWorkerState, t.fuzzer.Config().Fuzzing.Workers)
@@ -204,17 +202,25 @@ func (t *OptimizationTestCaseProvider) onWorkerCreated(event FuzzerWorkerCreated
 // and is about to exit the fuzzing loop. We use this event to attach shrink requests to the worker.
 // This way we are only shrinking once throughout the entire fuzzing campaign in optimization mode.
 func (t *OptimizationTestCaseProvider) onWorkerTestingComplete(event FuzzerWorkerTestingCompleteEvent) error {
-	// Acquire lock to see if this worker should handle the shrink requests or not
-	t.shrinkingRequestedLock.Lock()
-	if t.shrinkingRequested {
-		// If another thread has already been requested to shrink, exit early
-		t.shrinkingRequestedLock.Unlock()
-		return nil
-	} else {
-		// This is the first thread to reach this function, so set the boolean to true and handle shrink requests
-		t.shrinkingRequested = true
+	// Wait until every candidate producer has stopped before claiming its final request.
+	t.completionLock.Lock()
+	t.completedWorkers++
+	last := t.completedWorkers == t.fuzzer.config.Fuzzing.Workers
+	ready := t.completionReady
+	if last {
+		close(ready)
 	}
-	t.shrinkingRequestedLock.Unlock()
+	t.completionLock.Unlock()
+	if !last {
+		select {
+		case <-ready:
+		case <-t.fuzzer.emergencyCtx.Done():
+		}
+		return nil
+	}
+	if t.fuzzer.emergencyCtx.Err() != nil {
+		return nil
+	}
 
 	// Iterate across each test case to see if there is a shrink request for it
 	for _, testCase := range t.testCases {

@@ -715,7 +715,6 @@ func (fw *FuzzerWorker) run(baseTestChain *chain.TestChain) (bool, error) {
 		if len(fw.stateChangingMethods)+len(fw.pureMethods)+len(fw.fallbackMethods) == 0 {
 			fw.fuzzer.logger.Info("Initial property checks completed; no callable methods, stopping")
 			fw.fuzzer.Stop()
-			return true, nil
 		}
 	}
 

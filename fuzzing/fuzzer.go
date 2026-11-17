@@ -980,16 +980,12 @@ func defaultShrinkingValueMutatorFunc(fuzzer *Fuzzer, valueSet *valuegeneration.
 }
 
 // spawnWorkersLoop is a method which spawns a config-defined amount of FuzzerWorker to carry out the fuzzing campaign.
-// This function exits when Fuzzer.ctx is cancelled.
+// Each slot handles resets until graceful completion, an error, or emergency cancellation.
 func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
-	type workerSlot struct {
-		index          int
-		randomProvider *rand.Rand
-	}
 	f.workers = make([]*FuzzerWorker, f.config.Fuzzing.Workers)
-	slots := make(chan workerSlot, len(f.workers))
+	randomProviders := make([]*rand.Rand, len(f.workers))
 	for i := range f.workers {
-		slots <- workerSlot{i, randomutils.ForkRandomProvider(f.randomProvider)}
+		randomProviders[i] = randomutils.ForkRandomProvider(f.randomProvider)
 	}
 	var workers sync.WaitGroup
 	var errorLock sync.Mutex
@@ -1005,25 +1001,18 @@ func (f *Fuzzer) spawnWorkersLoop(baseTestChain *chain.TestChain) error {
 		errorLock.Unlock()
 		f.Terminate()
 	}
-launch:
-	for {
-		select {
-		case <-f.ctx.Done():
-			break launch
-		case slot := <-slots:
-			if utils.CheckContextDone(f.ctx) {
-				break launch
-			}
-			workers.Add(1)
-			go func() {
-				defer workers.Done()
-				worker, err := newFuzzerWorker(f, slot.index, slot.randomProvider)
-				f.workers[slot.index] = worker
+	for i, randomProvider := range randomProviders {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for !utils.CheckContextDone(f.emergencyCtx) {
+				worker, err := newFuzzerWorker(f, i, randomProvider)
+				f.workers[i] = worker
+				cancelled := false
 				if err == nil {
 					err = f.Events.WorkerCreated.Publish(FuzzerWorkerCreatedEvent{Worker: worker})
 				}
 				if err == nil {
-					var cancelled bool
 					cancelled, err = worker.run(baseTestChain)
 					if cancelled {
 						f.Stop()
@@ -1033,13 +1022,12 @@ launch:
 				if worker != nil {
 					recordError(f.Events.WorkerDestroyed.Publish(FuzzerWorkerDestroyedEvent{Worker: worker}))
 				}
-				// Reuse this index only after its final callback has finished.
-				select {
-				case slots <- slot:
-				case <-f.ctx.Done():
+				if cancelled || err != nil {
+					return
 				}
-			}()
-		}
+				// A reset still needs a replacement to publish its slot's graceful completion.
+			}
+		}()
 	}
 	workers.Wait()
 	return firstError
