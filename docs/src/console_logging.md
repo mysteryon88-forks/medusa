@@ -5,8 +5,7 @@ see [below](#differences-in-consolelogformatargs)). Note that if you are not usi
 Foundry or Hardhat as your compilation platform, you can retrieve the necessary `console.sol` library
 [here](https://github.com/foundry-rs/forge-std/blob/master/src/console.sol).
 
-For more information on the available function signatures and general tips on console logging, please review [Foundry's
-documentation](https://book.getfoundry.sh/reference/forge-std/console-log#console-logging).
+For more information on the available function signatures and general tips on console logging, please review [Foundry's documentation](https://book.getfoundry.sh/reference/forge-std/console-log#console-logging).
 
 ## Differences in `console.log(format[,...args])`
 

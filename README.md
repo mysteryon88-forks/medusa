@@ -34,7 +34,6 @@ mdbook serve
 Run the following command to install the latest version of `medusa`:
 
 ```shell
-
 go install github.com/crytic/medusa@latest
 ```
 

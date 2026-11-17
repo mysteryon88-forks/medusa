@@ -93,8 +93,8 @@ func TestWindowsFixtureEndpointPipe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reader.Close()
-	defer writer.Close()
+	defer func() { _ = reader.Close() }()
+	defer func() { _ = writer.Close() }()
 	r := newFixtureEndpoint(reader.Fd())
 	w := newFixtureEndpoint(writer.Fd())
 	if n, err := r.Read(nil); n != 0 || err != nil {

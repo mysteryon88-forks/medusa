@@ -28,7 +28,6 @@ We will go over each subcomponent one-by-one:
   Here is an example of a dynamically deployed contract:
 
 ```solidity
-
 contract MyContract {
   OtherContract otherContract;
   constructor() {

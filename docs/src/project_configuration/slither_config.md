@@ -5,7 +5,7 @@ Currently, we use Slither to extract interesting constants from the target syste
 fuzzing process to try to increase coverage. Note that if Slither fails to run for some reason, we will still try our
 best to mine constants from each contract's AST so don't worry!
 
-- > 🚩 We _highly_ recommend using Slither and caching the results. Basically, don't change this configuration unless
+- 🚩 We _highly_ recommend using Slither and caching the results. Basically, don't change this configuration unless
   > absolutely necessary. The constants identified by Slither are shown to greatly improve system coverage and caching
   > the results will improve the speed of medusa.
 

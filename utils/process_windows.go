@@ -89,7 +89,7 @@ func startCommandTree(command *exec.Cmd) (func() error, error) {
 		for _, handle := range handles {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
-				return errors.Join(cleanupErr, errors.New("Job Object cleanup exceeded one second"))
+				return errors.Join(cleanupErr, errors.New("job object cleanup exceeded one second"))
 			}
 			status, err := windows.WaitForSingleObject(handle, uint32(remaining.Milliseconds()+1))
 			if err != nil || status != windows.WAIT_OBJECT_0 {
@@ -99,7 +99,7 @@ func startCommandTree(command *exec.Cmd) (func() error, error) {
 		var accounting jobAccountingInformation
 		err := windows.QueryInformationJobObject(job, windows.JobObjectBasicAccountingInformation, uintptr(unsafe.Pointer(&accounting)), uint32(unsafe.Sizeof(accounting)), nil)
 		if accounting.ActiveProcesses != 0 {
-			err = errors.Join(err, errors.New("Job Object still contains active processes"))
+			err = errors.Join(err, errors.New("job object still contains active processes"))
 		}
 		return errors.Join(cleanupErr, err)
 	}, nil
@@ -122,7 +122,7 @@ func pinJobProcesses(job windows.Handle, deadline time.Time) ([]windows.Handle, 
 		}
 		for i := uint32(0); i < count; i++ {
 			if time.Now().After(deadline) {
-				return handles, errors.New("Job Object enumeration exceeded cleanup budget")
+				return handles, errors.New("job object enumeration exceeded cleanup budget")
 			}
 			pid := *(*uintptr)(unsafe.Pointer(&buffer[8+int(i)*int(unsafe.Sizeof(uintptr(0)))]))
 			handle, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
@@ -143,7 +143,7 @@ func pinJobProcesses(job windows.Handle, deadline time.Time) ([]windows.Handle, 
 		}
 		return handles, nil
 	}
-	return handles, errors.New("Job Object enumeration exceeded cleanup budget")
+	return handles, errors.New("job object enumeration exceeded cleanup budget")
 }
 
 func observeCommandExit(command *exec.Cmd) commandExit {
@@ -155,7 +155,7 @@ func resumeCommandThread(pid uint32) error {
 	if err != nil {
 		return err
 	}
-	defer windows.CloseHandle(snapshot)
+	defer func() { _ = windows.CloseHandle(snapshot) }()
 	entry := windows.ThreadEntry32{Size: uint32(unsafe.Sizeof(windows.ThreadEntry32{}))}
 	for err = windows.Thread32First(snapshot, &entry); err == nil; err = windows.Thread32Next(snapshot, &entry) {
 		if entry.OwnerProcessID != pid {
